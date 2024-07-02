@@ -119,8 +119,8 @@ class aggregation {
     TDIGEST,         ///< create a tdigest from a set of input values
     MERGE_TDIGEST,   ///< create a tdigest by merging multiple tdigests together
     HISTOGRAM,       ///< compute frequency of each element
-    MERGE_HISTOGRAM,  ///< merge partial values of HISTOGRAM aggregation,
-    MIN_BY          ///< min reduction by another column
+    MERGE_HISTOGRAM, ///< merge partial values of HISTOGRAM aggregation,
+    MIN_BY           ///< min reduction by another column
   };
 
   aggregation() = delete;
