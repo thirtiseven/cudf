@@ -385,7 +385,7 @@ std::unique_ptr<Base> make_argmin_aggregation();
 /**
  * @brief Factory to create a MIN_BY aggregation
  *
- * `MIN_BY` returns the value of the first element in the group that is the minimum
+ * `MIN_BY` returns the value of the element in the group that is the minimum
  * according to the order_by column.
  *
  * @return A MIN_BY aggregation object
