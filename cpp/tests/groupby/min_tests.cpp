@@ -32,6 +32,7 @@ template <typename V>
 struct groupby_min_test : public cudf::test::BaseFixture {};
 
 using K = int32_t;
+
 TYPED_TEST_SUITE(groupby_min_test, cudf::test::FixedWidthTypesWithoutFixedPoint);
 
 TYPED_TEST(groupby_min_test, basic)
