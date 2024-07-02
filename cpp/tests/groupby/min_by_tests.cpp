@@ -43,7 +43,7 @@ TYPED_TEST(groupby_min_by_test, basic)
   cudf::test::structs_column_wrapper vals {values, orders};
 
   cudf::test::fixed_width_column_wrapper<K> expect_keys{1, 2, 3};
-  cudf::test::fixed_width_column_wrapper<V> expect_values {4, 1, 2};
+  cudf::test::fixed_width_column_wrapper<K> expect_values {4, 1, 2};
   cudf::test::fixed_width_column_wrapper<V> expect_orders {1, 2, 3};
   cudf::test::structs_column_wrapper expect_vals {expect_values, expect_orders};
 
