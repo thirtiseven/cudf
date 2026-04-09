@@ -8,6 +8,7 @@
 #include <cudf_test/column_wrapper.hpp>
 #include <cudf_test/cudf_gtest.hpp>
 #include <cudf_test/table_utilities.hpp>
+#include <cudf_test/testing_main.hpp>
 #include <cudf_test/type_lists.hpp>
 
 #include <cudf/column/column_factories.hpp>
@@ -18,6 +19,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace pb = cudf::io::protobuf;
@@ -49,7 +51,7 @@ uint64_t zigzag_encode32(int32_t n)
   return static_cast<uint64_t>(static_cast<uint32_t>((n << 1) ^ (n >> 31)));
 }
 
-uint64_t zigzag_encode64(int64_t n)
+[[maybe_unused]] uint64_t zigzag_encode64(int64_t n)
 {
   return static_cast<uint64_t>((n << 1) ^ (n >> 63));
 }
@@ -208,15 +210,14 @@ pb::decode_protobuf_options make_scalar_options(
                       false});
   }
 
-  auto empty_hv = cudf::detail::make_host_vector<uint8_t>(0, cudf::get_default_stream());
-  auto empty_iv = cudf::detail::make_host_vector<int32_t>(0, cudf::get_default_stream());
-
-  std::vector<cudf::detail::host_vector<uint8_t>> default_strings(n);
-  std::vector<cudf::detail::host_vector<int32_t>> enum_valid(n);
+  std::vector<cudf::detail::host_vector<uint8_t>> default_strings;
+  default_strings.reserve(n);
+  std::vector<cudf::detail::host_vector<int32_t>> enum_valid;
+  enum_valid.reserve(n);
   std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> enum_names(n);
   for (int i = 0; i < n; ++i) {
-    default_strings[i] = cudf::detail::make_host_vector<uint8_t>(0, cudf::get_default_stream());
-    enum_valid[i]      = cudf::detail::make_host_vector<int32_t>(0, cudf::get_default_stream());
+    default_strings.push_back(cudf::detail::make_host_vector<uint8_t>(0, cudf::get_default_stream()));
+    enum_valid.push_back(cudf::detail::make_host_vector<int32_t>(0, cudf::get_default_stream()));
   }
 
   return pb::decode_protobuf_options{
@@ -270,12 +271,12 @@ TEST_F(ProtobufReaderTest, DecodeVarintAndString)
   // Check int64 child
   auto expected_ints =
     cudf::test::fixed_width_column_wrapper<int64_t>({42, 100, 0}, {true, true, false});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(0), expected_ints);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(0), expected_ints);
 
   // Check string child
   auto expected_strs =
     cudf::test::strings_column_wrapper({"hello", "world", "test"}, {true, true, true});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(1), expected_strs);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(1), expected_strs);
 }
 
 TEST_F(ProtobufReaderTest, DecodeNullInputRows)
@@ -296,7 +297,7 @@ TEST_F(ProtobufReaderTest, DecodeNullInputRows)
   // Null input rows should produce null values in child columns
   auto expected =
     cudf::test::fixed_width_column_wrapper<int64_t>({77, 0, 99}, {true, false, true});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(0), expected);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(0), expected);
 }
 
 TEST_F(ProtobufReaderTest, DecodeEmptyMessage)
@@ -315,10 +316,10 @@ TEST_F(ProtobufReaderTest, DecodeEmptyMessage)
   ASSERT_EQ(result->size(), 1);
 
   auto expected_int = cudf::test::fixed_width_column_wrapper<int64_t>({0}, {false});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(0), expected_int);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(0), expected_int);
 
   auto expected_str = cudf::test::strings_column_wrapper({""}, {false});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(1), expected_str);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(1), expected_str);
 }
 
 TEST_F(ProtobufReaderTest, DecodeZeroRows)
@@ -363,10 +364,10 @@ TEST_F(ProtobufReaderTest, DecodeMultipleNumericTypes)
   auto expected_float = cudf::test::fixed_width_column_wrapper<float>({3.14f});
   auto expected_dbl   = cudf::test::fixed_width_column_wrapper<double>({2.718});
 
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(0), expected_bool);
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(1), expected_int);
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(2), expected_float);
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(3), expected_dbl);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(0), expected_bool);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(1), expected_int);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(2), expected_float);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(3), expected_dbl);
 }
 
 TEST_F(ProtobufReaderTest, DecodeZigzagEncoding)
@@ -384,8 +385,8 @@ TEST_F(ProtobufReaderTest, DecodeZigzagEncoding)
   auto result = pb::decode_protobuf(*input, options);
 
   auto expected =
-    cudf::test::fixed_width_column_wrapper<int32_t>({-1, 0, 2147483647, -2147483648});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(0), expected);
+    cudf::test::fixed_width_column_wrapper<int32_t>({int32_t(-1), int32_t(0), int32_t(2147483647), std::numeric_limits<int32_t>::min()});
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(0), expected);
 }
 
 TEST_F(ProtobufReaderTest, DecodeFixedEncoding)
@@ -409,8 +410,8 @@ TEST_F(ProtobufReaderTest, DecodeFixedEncoding)
   auto expected_u64 =
     cudf::test::fixed_width_column_wrapper<uint64_t>({0x0102030405060708ULL});
 
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(0), expected_u32);
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(1), expected_u64);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(0), expected_u32);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(1), expected_u64);
 }
 
 TEST_F(ProtobufReaderTest, DecodeBytesField)
@@ -446,7 +447,7 @@ TEST_F(ProtobufReaderTest, DecodeLastOneWins)
   auto result = pb::decode_protobuf(*input, options);
 
   auto expected = cudf::test::fixed_width_column_wrapper<int64_t>({30});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(0), expected);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(0), expected);
 }
 
 // ============================================================================
@@ -478,13 +479,19 @@ TEST_F(ProtobufReaderTest, DecodeNestedMessage)
   };
 
   auto empty_hv = [](int count) {
-    std::vector<cudf::detail::host_vector<uint8_t>> v(count);
-    for (auto& h : v) { h = cudf::detail::make_host_vector<uint8_t>(0, cudf::get_default_stream()); }
+    std::vector<cudf::detail::host_vector<uint8_t>> v;
+    v.reserve(count);
+    for (int i = 0; i < count; ++i) {
+      v.push_back(cudf::detail::make_host_vector<uint8_t>(0, cudf::get_default_stream()));
+    }
     return v;
   };
   auto empty_iv = [](int count) {
-    std::vector<cudf::detail::host_vector<int32_t>> v(count);
-    for (auto& h : v) { h = cudf::detail::make_host_vector<int32_t>(0, cudf::get_default_stream()); }
+    std::vector<cudf::detail::host_vector<int32_t>> v;
+    v.reserve(count);
+    for (int i = 0; i < count; ++i) {
+      v.push_back(cudf::detail::make_host_vector<int32_t>(0, cudf::get_default_stream()));
+    }
     return v;
   };
 
@@ -506,14 +513,14 @@ TEST_F(ProtobufReaderTest, DecodeNestedMessage)
 
   // child(0) = id (INT32)
   auto expected_id = cudf::test::fixed_width_column_wrapper<int32_t>({42});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(0), expected_id);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(0), expected_id);
 
   // child(1) = inner (STRUCT with one child: name)
   ASSERT_EQ(result->child(1).type().id(), cudf::type_id::STRUCT);
   ASSERT_EQ(result->child(1).num_children(), 1);
 
   auto expected_name = cudf::test::strings_column_wrapper({"nested_value"});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->child(1).child(0), expected_name);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->child(1).child(0), expected_name);
 }
 
 // ============================================================================
@@ -542,13 +549,19 @@ TEST_F(ProtobufReaderTest, DecodeRepeatedInt)
   };
 
   auto empty_hv = [](int count) {
-    std::vector<cudf::detail::host_vector<uint8_t>> v(count);
-    for (auto& h : v) { h = cudf::detail::make_host_vector<uint8_t>(0, cudf::get_default_stream()); }
+    std::vector<cudf::detail::host_vector<uint8_t>> v;
+    v.reserve(count);
+    for (int i = 0; i < count; ++i) {
+      v.push_back(cudf::detail::make_host_vector<uint8_t>(0, cudf::get_default_stream()));
+    }
     return v;
   };
   auto empty_iv = [](int count) {
-    std::vector<cudf::detail::host_vector<int32_t>> v(count);
-    for (auto& h : v) { h = cudf::detail::make_host_vector<int32_t>(0, cudf::get_default_stream()); }
+    std::vector<cudf::detail::host_vector<int32_t>> v;
+    v.reserve(count);
+    for (int i = 0; i < count; ++i) {
+      v.push_back(cudf::detail::make_host_vector<int32_t>(0, cudf::get_default_stream()));
+    }
     return v;
   };
 
