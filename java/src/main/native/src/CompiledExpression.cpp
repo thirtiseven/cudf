@@ -7,12 +7,14 @@
 #include "jni_compiled_expr.hpp"
 
 #include <cudf/ast/expressions.hpp>
+#include <cudf/ast/jit_expressions.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/types.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -116,7 +118,8 @@ enum class jni_serialized_expression_type : int8_t {
   NULL_LITERAL     = 1,
   COLUMN_REFERENCE = 2,
   UNARY_OPERATION  = 3,
-  BINARY_OPERATION = 4
+  BINARY_OPERATION = 4,
+  JIT_OPERATION    = 5
 };
 
 /**
@@ -190,6 +193,23 @@ cudf::ast::ast_operator jni_to_binary_operator(jbyte jni_op_value)
     case 21: return cudf::ast::ast_operator::LOGICAL_OR;
     case 22: return cudf::ast::ast_operator::NULL_LOGICAL_OR;
     default: throw std::invalid_argument("unexpected JNI AST binary operator value");
+  }
+}
+
+/**
+ * Convert a Java AST serialized byte representing a JIT AST operator into the
+ * corresponding libcudf row IR opcode.
+ * NOTE: This must be kept in sync with the enumeration in JitOperator.java!
+ */
+cudf::detail::row_ir::opcode jni_to_jit_operator(jbyte jni_op_value)
+{
+  switch (jni_op_value) {
+    case 0: return cudf::detail::row_ir::opcode::ANSI_ADD;
+    case 1: return cudf::detail::row_ir::opcode::ANSI_SUB;
+    case 2: return cudf::detail::row_ir::opcode::ANSI_MUL;
+    case 3: return cudf::detail::row_ir::opcode::ANSI_ABS;
+    case 4: return cudf::detail::row_ir::opcode::ANSI_NEG;
+    default: throw std::invalid_argument("unexpected JNI AST JIT operator value");
   }
 }
 
@@ -348,6 +368,22 @@ cudf::ast::operation& compile_binary_expression(cudf::jni::ast::compiled_expr& c
     std::make_unique<cudf::ast::operation>(ast_op, left_child, right_child));
 }
 
+/** Decode a serialized JIT AST expression */
+cudf::ast::expression& compile_jit_expression(cudf::jni::ast::compiled_expr& compiled_expr,
+                                              jni_serialized_ast& jni_ast)
+{
+  auto const opcode = jni_to_jit_operator(jni_ast.read_byte());
+  auto const arity  = static_cast<int32_t>(jni_ast.read_byte());
+  if (arity < 0) { throw std::invalid_argument("unexpected JNI AST JIT operator arity"); }
+  std::vector<std::reference_wrapper<cudf::ast::expression const>> args;
+  args.reserve(arity);
+  for (int32_t index = 0; index < arity; ++index) {
+    args.emplace_back(compile_expression(compiled_expr, jni_ast));
+  }
+  return compiled_expr.add_expression(
+    std::make_unique<cudf::ast::jit::detail::operation>(opcode, std::move(args)));
+}
+
 /** Decode a serialized AST expression by reading the expression type and dispatching */
 cudf::ast::expression& compile_expression(cudf::jni::ast::compiled_expr& compiled_expr,
                                           jni_serialized_ast& jni_ast)
@@ -364,6 +400,8 @@ cudf::ast::expression& compile_expression(cudf::jni::ast::compiled_expr& compile
       return compile_unary_expression(compiled_expr, jni_ast);
     case jni_serialized_expression_type::BINARY_OPERATION:
       return compile_binary_expression(compiled_expr, jni_ast);
+    case jni_serialized_expression_type::JIT_OPERATION:
+      return compile_jit_expression(compiled_expr, jni_ast);
     default: throw std::invalid_argument("data is not a serialized AST expression");
   }
 }

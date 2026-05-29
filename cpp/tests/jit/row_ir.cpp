@@ -87,9 +87,9 @@ TEST_F(RowIRCudaCodeGenTest, SetOutput)
     set_output_0.emit_code(ctx, target_info, sink);
 
     auto expected_code =
-      R"***(int32_t tmp_0 = in_0;
-int32_t tmp_1 = tmp_0;
-*out_0 = tmp_1;
+      R"***(int32_t tmp_1 = in_0;
+int32_t tmp_0 = tmp_1;
+*out_0 = tmp_0;
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_code);
@@ -109,9 +109,9 @@ int32_t tmp_1 = tmp_0;
     set_output_1.emit_code(ctx, target_info, sink);
 
     auto expected_code =
-      R"***(float tmp_0 = in_1;
-float tmp_1 = tmp_0;
-*out_1 = tmp_1;
+      R"***(float tmp_1 = in_1;
+float tmp_0 = tmp_1;
+*out_1 = tmp_0;
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_code);
@@ -135,8 +135,9 @@ TEST_F(RowIRCudaCodeGenTest, UnaryOperation)
     op.emit_code(ctx, target_info, sink);
 
     auto expected_code =
-      R"***(int32_t tmp_0 = in_0;
-int32_t tmp_1 = cudf::ast::detail::operator_functor<cudf::ast::ast_operator::IDENTITY, false>{}(tmp_0);
+      R"***(int32_t tmp_1 = in_0;
+int32_t tmp_0;
+cudf::ops::identity(&tmp_0, &tmp_1);
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_code);
@@ -154,8 +155,9 @@ int32_t tmp_1 = cudf::ast::detail::operator_functor<cudf::ast::ast_operator::IDE
     op.emit_code(ctx, target_info, sink);
 
     auto expected_null_code =
-      R"***(numeric::decimal32 tmp_0 = in_1;
-numeric::decimal32 tmp_1 = cudf::ast::detail::operator_functor<cudf::ast::ast_operator::IDENTITY, false>{}(tmp_0);
+      R"***(numeric::decimal32 tmp_1 = in_1;
+numeric::decimal32 tmp_0;
+cudf::ops::identity(&tmp_0, &tmp_1);
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_null_code);
@@ -180,9 +182,10 @@ TEST_F(RowIRCudaCodeGenTest, BinaryOperation)
     op.emit_code(ctx, target_info, sink);
 
     auto expected_code =
-      R"***(int32_t tmp_0 = in_0;
-int32_t tmp_1 = in_0;
-int32_t tmp_2 = cudf::ast::detail::operator_functor<cudf::ast::ast_operator::ADD, false>{}(tmp_0, tmp_1);
+      R"***(int32_t tmp_1 = in_0;
+int32_t tmp_2 = in_0;
+int32_t tmp_0;
+cudf::ops::add(&tmp_0, &tmp_1, &tmp_2);
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_code);
@@ -202,9 +205,10 @@ int32_t tmp_2 = cudf::ast::detail::operator_functor<cudf::ast::ast_operator::ADD
     op.emit_code(ctx, target_info, sink);
 
     auto expected_null_code =
-      R"***(numeric::decimal32 tmp_0 = in_1;
-numeric::decimal32 tmp_1 = in_1;
-numeric::decimal32 tmp_2 = cudf::ast::detail::operator_functor<cudf::ast::ast_operator::ADD, false>{}(tmp_0, tmp_1);
+      R"***(numeric::decimal32 tmp_1 = in_1;
+numeric::decimal32 tmp_2 = in_1;
+numeric::decimal32 tmp_0;
+cudf::ops::add(&tmp_0, &tmp_1, &tmp_2);
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_null_code);
@@ -249,16 +253,20 @@ TEST_F(RowIRCudaCodeGenTest, VectorLengthOperation)
     expr_ir.emit_code(ctx, target_info, sink);
 
     auto expected_code =
-      R"***(double tmp_0 = in_0;
-double tmp_1 = in_0;
-double tmp_2 = cudf::ast::detail::operator_functor<cudf::ast::ast_operator::MUL, false>{}(tmp_0, tmp_1);
-double tmp_3 = in_1;
-double tmp_4 = in_1;
-double tmp_5 = cudf::ast::detail::operator_functor<cudf::ast::ast_operator::MUL, false>{}(tmp_3, tmp_4);
-double tmp_6 = cudf::ast::detail::operator_functor<cudf::ast::ast_operator::ADD, false>{}(tmp_2, tmp_5);
-double tmp_7 = cudf::ast::detail::operator_functor<cudf::ast::ast_operator::SQRT, false>{}(tmp_6);
-double tmp_8 = tmp_7;
-*out_0 = tmp_8;
+      R"***(double tmp_4 = in_0;
+double tmp_5 = in_0;
+double tmp_3;
+cudf::ops::mul(&tmp_3, &tmp_4, &tmp_5);
+double tmp_7 = in_1;
+double tmp_8 = in_1;
+double tmp_6;
+cudf::ops::mul(&tmp_6, &tmp_7, &tmp_8);
+double tmp_2;
+cudf::ops::add(&tmp_2, &tmp_3, &tmp_6);
+double tmp_1;
+cudf::ops::sqrt(&tmp_1, &tmp_2);
+double tmp_0 = tmp_1;
+*out_0 = tmp_0;
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_code);
@@ -295,7 +303,7 @@ TEST_F(RowIRCudaCodeGenTest, AstConversionBasic)
   EXPECT_EQ(transform_args.source_type, cudf::udf_source_type::CUDA);
   EXPECT_EQ(transform_args.is_null_aware, cudf::null_aware::NO);
   EXPECT_EQ(transform_args.outputs.size(), 1);
-  EXPECT_EQ(transform_args.outputs[0].nullability, cudf::output_nullability::ALL_VALID);
+  EXPECT_EQ(transform_args.outputs[0].nullability, cudf::output_nullability::PRESERVE);
   EXPECT_EQ(transform_args.outputs[0].type, cudf::data_type{cudf::type_id::INT32});
   ASSERT_EQ(transform_args.inputs.size(), 2);
 
@@ -313,14 +321,15 @@ TEST_F(RowIRCudaCodeGenTest, AstConversionBasic)
             column->null_count());
 
   auto expected_udf =
-    R"***(__device__ void expression(int32_t* out_0, int32_t in_0, int32_t in_1)
+    R"***(__device__ cudf::ops::errc expression(int32_t* out_0, int32_t in_0, int32_t in_1)
 {
-int32_t tmp_0 = in_0;
-int32_t tmp_1 = in_1;
-int32_t tmp_2 = cudf::ast::detail::operator_functor<cudf::ast::ast_operator::ADD, false>{}(tmp_0, tmp_1);
-int32_t tmp_3 = tmp_2;
-*out_0 = tmp_3;
-return;
+int32_t tmp_2 = in_0;
+int32_t tmp_3 = in_1;
+int32_t tmp_1;
+cudf::ops::add(&tmp_1, &tmp_2, &tmp_3);
+int32_t tmp_0 = tmp_1;
+*out_0 = tmp_0;
+return cudf::ops::errc::OK;
 })***";
 
   EXPECT_EQ(transform_args.udf, expected_udf);
@@ -332,7 +341,8 @@ return;
                                       transform_args.inputs,
                                       transform_args.outputs,
                                       std::move(transform_args.string_offsets),
-                                      transform_args.row_size);
+                                      transform_args.row_size,
+                                      transform_args.error_mode);
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->get_column(0).view());
 }
@@ -351,8 +361,9 @@ TEST_F(RowIRCudaCodeGenTest, FilterPredicate)
     filter_predicate.instantiate(ctx);
     filter_predicate.emit_code(ctx, target_info, sink);
 
-    auto expected_code = R"***(bool tmp_0 = in_0;
-bool tmp_1 = cudf::ast::detail::predicate(tmp_0);
+    auto expected_code = R"***(bool tmp_1 = in_0;
+bool tmp_0;
+cudf::ops::predicate(&tmp_0, &tmp_1);
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_code);
@@ -369,11 +380,67 @@ bool tmp_1 = cudf::ast::detail::predicate(tmp_0);
     filter_predicate.instantiate(ctx);
     filter_predicate.emit_code(ctx, target_info, sink);
 
-    auto expected_code = R"***(cuda::std::optional<bool> tmp_0 = in_0;
-bool tmp_1 = cudf::ast::detail::predicate(tmp_0);
+    auto expected_code = R"***(cuda::std::optional<bool> tmp_1 = in_0;
+cuda::std::optional<bool> tmp_0;
+cudf::ops::predicate(&tmp_0, &tmp_1);
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_code);
+  }
+}
+
+TEST_F(RowIRCudaCodeGenTest, FallibleBinaryOperation)
+{
+  row_ir::target_info target_info{row_ir::target::CUDA};
+
+  {
+    row_ir::instance_context ctx{cudf::get_default_stream(),
+                                 cudf::get_current_device_resource_ref()};
+    [[maybe_unused]] auto in0 = ctx.add_input(*i32);
+    [[maybe_unused]] auto in1 = ctx.add_input(*d32);
+    row_ir::code_sink sink;
+    row_ir::node op{row_ir::opcode::ANSI_ADD,
+                    std::nullopt,
+                    row_ir::node{row_ir::input_reference{0}},
+                    row_ir::node{row_ir::input_reference{0}}};
+    op.instantiate(ctx);
+    op.emit_code(ctx, target_info, sink);
+
+    auto expected_code =
+      R"***(int32_t tmp_1 = in_0;
+int32_t tmp_2 = in_0;
+int32_t tmp_0;
+if(cudf::ops::errc e = cudf::ops::ansi_add(&tmp_0, &tmp_1, &tmp_2); e != cudf::ops::errc::OK) {
+return e;
+}
+)***";
+
+    EXPECT_EQ(sink.get_code(), expected_code);
+  }
+
+  {
+    row_ir::instance_context ctx{cudf::get_default_stream(),
+                                 cudf::get_current_device_resource_ref()};
+    [[maybe_unused]] auto in0 = ctx.add_input(*i32);
+    [[maybe_unused]] auto in1 = ctx.add_input(*d32);
+    row_ir::code_sink sink;
+    row_ir::node op{row_ir::opcode::ANSI_ADD,
+                    std::nullopt,
+                    row_ir::node{row_ir::input_reference{1}},
+                    row_ir::node{row_ir::input_reference{1}}};
+    op.instantiate(ctx);
+    op.emit_code(ctx, target_info, sink);
+
+    auto expected_null_code =
+      R"***(numeric::decimal32 tmp_1 = in_1;
+numeric::decimal32 tmp_2 = in_1;
+numeric::decimal32 tmp_0;
+if(cudf::ops::errc e = cudf::ops::ansi_add(&tmp_0, &tmp_1, &tmp_2); e != cudf::ops::errc::OK) {
+return e;
+}
+)***";
+
+    EXPECT_EQ(sink.get_code(), expected_null_code);
   }
 }
 

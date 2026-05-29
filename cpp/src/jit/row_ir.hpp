@@ -6,8 +6,11 @@
 #pragma once
 #include <cudf/ast/detail/operators.hpp>
 #include <cudf/ast/expressions.hpp>
+#include <cudf/ast/jit_expressions.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/io/types.hpp>
+#include <cudf/operators/error.hpp>
+#include <cudf/operators/op_traits.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/stream_compaction.hpp>
 #include <cudf/transform.hpp>
@@ -93,6 +96,7 @@ struct [[nodiscard]] transform_args {
   std::vector<transform_output> outputs                    = {};
   std::vector<std::unique_ptr<column>> string_offsets      = {};
   std::optional<size_type> row_size                        = std::nullopt;
+  ops::error_mode error_mode                               = ops::error_mode::IGNORE;
 };
 
 /**
@@ -201,66 +205,6 @@ struct [[nodiscard]] output_reference {
   int32_t index = 0;  ///< The index of the output variable
 };
 
-/**
- * @brief The operation code used in the IR nodes.
- */
-enum class opcode : int32_t {
-  GET_INPUT,
-  SET_OUTPUT,
-  PREDICATE,
-  RESCALE,
-  ADD,
-  SUB,
-  MUL,
-  DIV,
-  TRUE_DIV,
-  FLOOR_DIV,
-  MOD,
-  PYMOD,
-  POW,
-  EQUAL,
-  NULL_EQUAL,
-  NOT_EQUAL,
-  LESS,
-  GREATER,
-  LESS_EQUAL,
-  GREATER_EQUAL,
-  BITWISE_AND,
-  BITWISE_OR,
-  BITWISE_XOR,
-  LOGICAL_AND,
-  NULL_LOGICAL_AND,
-  LOGICAL_OR,
-  NULL_LOGICAL_OR,
-  IDENTITY,
-  IS_NULL,
-  SIN,
-  COS,
-  TAN,
-  ARCSIN,
-  ARCCOS,
-  ARCTAN,
-  SINH,
-  COSH,
-  TANH,
-  ARCSINH,
-  ARCCOSH,
-  ARCTANH,
-  EXP,
-  LOG,
-  SQRT,
-  CBRT,
-  CEIL,
-  FLOOR,
-  ABS,
-  RINT,
-  BIT_INVERT,
-  NOT,
-  CAST_TO_INT64,
-  CAST_TO_UINT64,
-  CAST_TO_FLOAT64
-};
-
 struct [[nodiscard]] node {
  private:
   std::variant<std::monostate, input_reference, output_reference> reference_ =
@@ -272,6 +216,8 @@ struct [[nodiscard]] node {
   data_type type_ = {};  ///< The resolved type information of the IR node
 
   std::string id_ = {};  ///< The identifier of the IR node
+  input_reference
+    scale_reference_;  ///< The index of the scale variable for decimal rescaling if applicable
 
   /**
    * @brief Create a set of argument IR nodes
@@ -377,7 +323,7 @@ struct [[nodiscard]] node {
    * @brief Get the operation code of the operation
    * @return The operation code of the operation
    */
-  [[nodiscard]] opcode get_opcode() const;
+  opcode get_opcode() const;
 
   /** @brief Get the arguments of the operation
    * @return A span of unique pointers to the arguments of the operation
@@ -398,6 +344,12 @@ struct [[nodiscard]] node {
    * nullability of its input.
    */
   [[nodiscard]] bool is_always_valid() const;
+
+  /**
+   * @brief Get if the IR node can raise an error during evaluation.
+   * @return `true` if the IR node can raise an error during evaluation, `false` otherwise
+   */
+  [[nodiscard]] bool is_fallible() const;
 
   /**
    * @brief Instantiate the IR node with the given context and instance information, setting up any
@@ -467,7 +419,9 @@ struct [[nodiscard]] ast_converter {
 
   [[nodiscard]] std::unique_ptr<row_ir::node> add_ir_node(ast::detail::predicate const& expr);
 
-  [[nodiscard]] std::tuple<std::string, null_aware, output_nullability> generate_code(
+  [[nodiscard]] std::unique_ptr<row_ir::node> add_ir_node(ast::jit::detail::operation const& expr);
+
+  [[nodiscard]] std::tuple<std::string, null_aware, output_nullability, bool> generate_code(
     target target, ast::expression const& expr, std::string_view function_name);
 
   /**

@@ -28,6 +28,7 @@ std::unique_ptr<table> filter(std::string const& predicate_udf,
                               std::optional<void*> user_data,
                               std::span<transform_input const> predicate_inputs,
                               table_view const& filter_table,
+                              ops::error_mode error_mode,
                               output_nullability predicate_nullability,
                               rmm::cuda_stream_view stream,
                               rmm::device_async_resource_ref mr)
@@ -41,16 +42,6 @@ std::unique_ptr<table> filter(std::string const& predicate_udf,
                            [&](auto const& col) { return col.size() == row_size; }),
                "All columns to filter must have the same number of rows.",
                std::invalid_argument);
-  CUDF_EXPECTS(std::all_of(predicate_inputs.begin(),
-                           predicate_inputs.end(),
-                           [&](auto& input) {
-                             if (auto* col = std::get_if<column_view>(&input)) {
-                               return col->size() == row_size;
-                             }
-                             return true;
-                           }),
-               "All predicate input columns must have the same number of rows as the filter table.",
-               std::invalid_argument);
 
   transform_output outputs[] = {transform_output{data_type{type_id::BOOL8}, predicate_nullability}};
 
@@ -62,6 +53,7 @@ std::unique_ptr<table> filter(std::string const& predicate_udf,
                                       outputs,
                                       {},
                                       filter_table.num_rows(),
+                                      error_mode,
                                       stream,
                                       mr);
 
@@ -90,6 +82,7 @@ std::unique_ptr<table> filter(table_view const& predicate_table,
                         args.user_data,
                         args.inputs,
                         filter_table,
+                        args.error_mode,
                         args.outputs[0].nullability,
                         stream,
                         mr);
@@ -113,6 +106,7 @@ std::vector<std::unique_ptr<column>> filter_extended(
                               user_data,
                               predicate_inputs,
                               table_view{filter_columns},
+                              ops::error_mode::IGNORE,
                               predicate_nullability,
                               stream,
                               mr);
@@ -150,6 +144,7 @@ std::vector<std::unique_ptr<column>> filter(std::vector<column_view> const& pred
                               user_data,
                               inputs,
                               table_view{filter_columns},
+                              ops::error_mode::IGNORE,
                               predicate_nullability,
                               stream,
                               mr);

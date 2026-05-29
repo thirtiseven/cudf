@@ -53,6 +53,12 @@ class compiled_expr {
     return static_cast<cudf::ast::operation&>(*expressions.back());
   }
 
+  cudf::ast::expression& add_expression(std::unique_ptr<cudf::ast::expression> expr_ptr)
+  {
+    expressions.push_back(std::move(expr_ptr));
+    return *expressions.back();
+  }
+
   /** Return the expression node at the top of the tree */
   cudf::ast::expression& get_top_expression() const { return *expressions.back(); }
 };
