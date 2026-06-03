@@ -212,6 +212,8 @@ cudf::detail::row_ir::opcode jni_to_jit_operator(jbyte jni_op_value)
     case 5: return cudf::detail::row_ir::opcode::BIT_SHIFT_LEFT;
     case 6: return cudf::detail::row_ir::opcode::BIT_SHIFT_RIGHT;
     case 7: return cudf::detail::row_ir::opcode::COALESCE;
+    case 8: return cudf::detail::row_ir::opcode::NULLIFY_IF;
+    case 9: return cudf::detail::row_ir::opcode::PREDICATE;
     default: throw std::invalid_argument("unexpected JNI AST JIT operator value");
   }
 }
