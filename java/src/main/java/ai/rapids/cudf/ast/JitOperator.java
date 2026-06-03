@@ -16,7 +16,10 @@ public enum JitOperator {
   ANSI_SUB(1, 2),
   ANSI_MUL(2, 2),
   ANSI_ABS(3, 1),
-  ANSI_NEG(4, 1);
+  ANSI_NEG(4, 1),
+  BIT_SHIFT_LEFT(5, 2),
+  BIT_SHIFT_RIGHT(6, 2),
+  COALESCE(7, 2);
 
   private final byte nativeId;
   private final int arity;

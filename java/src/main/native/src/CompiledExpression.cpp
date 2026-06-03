@@ -209,6 +209,9 @@ cudf::detail::row_ir::opcode jni_to_jit_operator(jbyte jni_op_value)
     case 2: return cudf::detail::row_ir::opcode::ANSI_MUL;
     case 3: return cudf::detail::row_ir::opcode::ANSI_ABS;
     case 4: return cudf::detail::row_ir::opcode::ANSI_NEG;
+    case 5: return cudf::detail::row_ir::opcode::BIT_SHIFT_LEFT;
+    case 6: return cudf::detail::row_ir::opcode::BIT_SHIFT_RIGHT;
+    case 7: return cudf::detail::row_ir::opcode::COALESCE;
     default: throw std::invalid_argument("unexpected JNI AST JIT operator value");
   }
 }
