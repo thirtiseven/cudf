@@ -12,10 +12,20 @@ import java.util.Objects;
 public final class JitOperation extends AstExpression {
   private final JitOperator op;
   private final AstExpression[] inputs;
+  private final Integer targetScale;
 
   public JitOperation(JitOperator op, AstExpression... inputs) {
+    this(op, null, inputs);
+  }
+
+  public JitOperation(JitOperator op, int targetScale, AstExpression... inputs) {
+    this(op, Integer.valueOf(targetScale), inputs);
+  }
+
+  private JitOperation(JitOperator op, Integer targetScale, AstExpression... inputs) {
     this.op = Objects.requireNonNull(op, "op is null");
     this.inputs = Objects.requireNonNull(inputs, "inputs is null").clone();
+    this.targetScale = targetScale;
     if (this.inputs.length != op.getArity()) {
       throw new IllegalArgumentException(
           op + " requires " + op.getArity() + " inputs, found " + this.inputs.length);
@@ -30,6 +40,10 @@ public final class JitOperation extends AstExpression {
     int size = ExpressionType.JIT_EXPRESSION.getSerializedSize() +
         op.getSerializedSize() +
         Byte.BYTES;
+    size += Byte.BYTES;
+    if (targetScale != null) {
+      size += Integer.BYTES;
+    }
     for (AstExpression input : inputs) {
       size += input.getSerializedSize();
     }
@@ -41,6 +55,10 @@ public final class JitOperation extends AstExpression {
     ExpressionType.JIT_EXPRESSION.serialize(bb);
     op.serialize(bb);
     bb.put((byte) inputs.length);
+    bb.put((byte) (targetScale == null ? 0 : 1));
+    if (targetScale != null) {
+      bb.putInt(targetScale);
+    }
     for (AstExpression input : inputs) {
       input.serialize(bb);
     }

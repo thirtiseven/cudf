@@ -21,7 +21,13 @@ public enum JitOperator {
   BIT_SHIFT_RIGHT(6, 2),
   COALESCE(7, 2),
   NULLIFY_IF(8, 2),
-  PREDICATE(9, 1);
+  PREDICATE(9, 1),
+  ANSI_PRECISION_CHECK(10, 2),
+  ANSI_TRY_PRECISION_CHECK(11, 2),
+  CAST_TO_DEC32(12, 1),
+  CAST_TO_DEC64(13, 1),
+  CAST_TO_DEC128(14, 1),
+  RESCALE(15, 1);
 
   private final byte nativeId;
   private final int arity;

@@ -333,7 +333,8 @@ __device__ inline errc rescale(optional<decimal<R>>* out,
 {
   if (a->has_value() && new_scale->has_value()) {
     decimal<R> r;
-    rescale(&r, &a->value(), new_scale->value());
+    auto const scale = new_scale->value();
+    rescale(&r, &a->value(), &scale);
     *out = r;
   } else {
     *out = nullopt;
