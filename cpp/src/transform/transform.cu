@@ -802,6 +802,25 @@ auto finalize_outputs(null_aware is_null_aware,
   return results;
 }
 
+void check_transform_error(ops::error_mode error_handling_mode,
+                           std::optional<rmm::device_scalar<jit::error_sink>> const& d_error_sink,
+                           rmm::cuda_stream_view stream)
+{
+  switch (error_handling_mode) {
+    case ops::error_mode::IGNORE: break;
+    case ops::error_mode::ANY_ROW: {
+      auto error = d_error_sink->value(stream).any_error();
+      switch (error) {
+        case ops::errc::OK: break;
+        case ops::errc::OVERFLOW: CUDF_FAIL("Overflow error in transform UDF", std::overflow_error);
+        case ops::errc::DIVISION_BY_ZERO:
+          CUDF_FAIL("Division by zero error in transform UDF", std::overflow_error);
+        default: CUDF_FAIL("Unknown error in transform UDF", std::runtime_error);
+      }
+    } break;
+  }
+}
+
 std::unique_ptr<table> execute_transform(std::string const& udf,
                                          udf_source_type source_type,
                                          ops::error_mode error_handling_mode,
@@ -851,22 +870,9 @@ std::unique_ptr<table> execute_transform(std::string const& udf,
                      stream,
                      mr);
 
-  auto finalized = finalize_outputs(is_null_aware, row_size, std::move(output_columns), stream, mr);
+  check_transform_error(error_handling_mode, d_error_sink, stream);
 
-  switch (error_handling_mode) {
-    case ops::error_mode::IGNORE: {
-    } break;
-    case ops::error_mode::ANY_ROW: {
-      auto error = d_error_sink->value(stream).any_error();
-      switch (error) {
-        case ops::errc::OK: break;
-        case ops::errc::OVERFLOW: CUDF_FAIL("Overflow error in transform UDF", std::overflow_error);
-        case ops::errc::DIVISION_BY_ZERO:
-          CUDF_FAIL("Division by zero error in transform UDF", std::overflow_error);
-        default: CUDF_FAIL("Unknown error in transform UDF", std::runtime_error);
-      }
-    } break;
-  }
+  auto finalized = finalize_outputs(is_null_aware, row_size, std::move(output_columns), stream, mr);
 
   return std::make_unique<table>(std::move(finalized));
 }

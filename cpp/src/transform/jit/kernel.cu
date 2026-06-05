@@ -46,29 +46,35 @@ namespace cudf {
 namespace jit {
 
 template <ops::error_mode mode, bool has_user_data, typename Args>
-__device__ void execute_transform_op(error_sink* __restrict__ error_sink,
+__device__ bool execute_transform_op(error_sink* __restrict__ error_sink,
                                      void* user_data,
                                      size_type element_idx,
                                      Args args)
 {
   // TODO: static assert invocable
   if constexpr (has_user_data) {
-    cuda::std::apply(
+    return cuda::std::apply(
       [&](auto... a) {
         if constexpr (mode == ops::error_mode::IGNORE) {
           GENERIC_TRANSFORM_OP(a...);
+          return true;
         } else {
-          error_sink->report<mode>(GENERIC_TRANSFORM_OP(a...));
+          auto const error = GENERIC_TRANSFORM_OP(a...);
+          error_sink->report<mode>(error);
+          return error == ops::errc::OK;
         }
       },
       cuda::std::tuple_cat(cuda::std::tuple{user_data, element_idx}, args));
   } else {
-    cuda::std::apply(
+    return cuda::std::apply(
       [&](auto... a) {
         if constexpr (mode == ops::error_mode::IGNORE) {
           GENERIC_TRANSFORM_OP(a...);
+          return true;
         } else {
-          error_sink->report<mode>(GENERIC_TRANSFORM_OP(a...));
+          auto const error = GENERIC_TRANSFORM_OP(a...);
+          error_sink->report<mode>(error);
+          return error == ops::errc::OK;
         }
       },
       args);
@@ -106,8 +112,9 @@ CUDF_KERNEL void transform_kernel(size_type row_size,
       auto out_ptrs =
         cuda::std::apply([&](auto&... args) { return cuda::std::tuple{&args...}; }, outs);
 
-      execute_transform_op<error_mode, has_user_data>(
+      auto const success = execute_transform_op<error_mode, has_user_data>(
         error_sink, user_data, element_idx, cuda::std::tuple_cat(out_ptrs, ins));
+      if (!success) { continue; }
 
       OutputAccessors::map([&]<typename... A>() {
         (A::assign(output_cols, element_idx, cuda::std::get<A::index>(outs)), ...);
@@ -127,13 +134,18 @@ CUDF_KERNEL void transform_kernel(size_type row_size,
       auto out_ptrs =
         cuda::std::apply([&](auto&... args) { return cuda::std::tuple{&args...}; }, outs);
 
-      execute_transform_op<error_mode, has_user_data>(
+      auto const success = execute_transform_op<error_mode, has_user_data>(
         error_sink, user_data, element_idx, cuda::std::tuple_cat(out_ptrs, ins));
 
       OutputAccessors::map([&]<typename... A>() {
-        (A::assign(output_cols, element_idx, *cuda::std::get<A::index>(outs)), ...);
+        if (success) {
+          (A::assign(output_cols, element_idx, *cuda::std::get<A::index>(outs)), ...);
+        }
         (warp_compact_validity<A>(
-           active_mask, output_cols, element_idx, cuda::std::get<A::index>(outs).has_value()),
+           active_mask,
+           output_cols,
+           element_idx,
+           success && cuda::std::get<A::index>(outs).has_value()),
          ...);
       });
     }
