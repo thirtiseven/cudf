@@ -312,6 +312,95 @@ public class CompiledExpressionTest extends CudfTestBase {
     return result;
   }
 
+  @Test
+  void testJitOperationArityValidation() {
+    AstExpression[] inputs = new AstExpression[] {
+        new ColumnReference(0),
+        new ColumnReference(1),
+        new ColumnReference(2)
+    };
+    for (JitOperator op : JitOperator.values()) {
+      Assertions.assertDoesNotThrow(
+          () -> new JitOperation(op, Arrays.copyOf(inputs, op.getArity())));
+      if (op.getArity() > 0) {
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> new JitOperation(op, Arrays.copyOf(inputs, op.getArity() - 1)));
+      }
+    }
+  }
+
+  @Test
+  void testJitTryDivModTransform() {
+    try (Table t = new Table.TestBuilder()
+        .column(10, 7, null, 6)
+        .column(2, 0, 3, null)
+        .build()) {
+      JitOperation divExpr = new JitOperation(JitOperator.ANSI_TRY_DIV,
+          new ColumnReference(0),
+          new ColumnReference(1));
+      try (CompiledExpression compiledExpr = divExpr.compile();
+           ColumnVector actual = compiledExpr.computeColumn(t);
+           ColumnVector expected = ColumnVector.fromBoxedInts(5, null, null, null)) {
+        assertColumnsAreEqual(expected, actual);
+      }
+
+      JitOperation modExpr = new JitOperation(JitOperator.ANSI_TRY_MOD,
+          new ColumnReference(0),
+          new ColumnReference(1));
+      try (CompiledExpression compiledExpr = modExpr.compile();
+           ColumnVector actual = compiledExpr.computeColumn(t);
+           ColumnVector expected = ColumnVector.fromBoxedInts(0, null, null, null)) {
+        assertColumnsAreEqual(expected, actual);
+      }
+    }
+  }
+
+  @Test
+  void testJitPrimitiveCastTransform() {
+    try (Table t = new Table.TestBuilder().column(1, -2, null, 3).build()) {
+      JitOperation castToInt = new JitOperation(JitOperator.CAST_TO_I32, new ColumnReference(0));
+      try (CompiledExpression compiledExpr = castToInt.compile();
+           ColumnVector actual = compiledExpr.computeColumn(t);
+           ColumnVector expected = ColumnVector.fromBoxedInts(1, -2, null, 3)) {
+        assertColumnsAreEqual(expected, actual);
+      }
+
+      JitOperation castToLong = new JitOperation(JitOperator.CAST_TO_I64, new ColumnReference(0));
+      try (CompiledExpression compiledExpr = castToLong.compile();
+           ColumnVector actual = compiledExpr.computeColumn(t);
+           ColumnVector expected = ColumnVector.fromBoxedLongs(1L, -2L, null, 3L)) {
+        assertColumnsAreEqual(expected, actual);
+      }
+
+      JitOperation castToDouble = new JitOperation(JitOperator.CAST_TO_F64, new ColumnReference(0));
+      try (CompiledExpression compiledExpr = castToDouble.compile();
+           ColumnVector actual = compiledExpr.computeColumn(t);
+           ColumnVector expected = ColumnVector.fromBoxedDoubles(1.0, -2.0, null, 3.0)) {
+        assertColumnsAreEqual(expected, actual);
+      }
+    }
+  }
+
+  @Test
+  void testJitIfElseTransform() {
+    try (Table t = new Table.TestBuilder()
+        .column(1, 2, 3, 4)
+        .column(10, 20, 30, 40)
+        .column(true, false, true, false)
+        .build()) {
+      JitOperation expr = new JitOperation(JitOperator.IF_ELSE,
+          new ColumnReference(0),
+          new ColumnReference(1),
+          new ColumnReference(2));
+      try (CompiledExpression compiledExpr = expr.compile();
+           ColumnVector actual = compiledExpr.computeColumn(t);
+           ColumnVector expected = ColumnVector.fromBoxedInts(1, 20, 3, 40)) {
+        assertColumnsAreEqual(expected, actual);
+      }
+    }
+  }
+
   private static Stream<Arguments> createUnaryDoubleOperationParams() {
     Double[] input = new Double[] { -5., 4.5, null, 2.7, 1.5 };
     return Stream.of(

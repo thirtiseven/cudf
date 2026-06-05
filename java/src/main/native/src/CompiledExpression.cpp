@@ -221,6 +221,27 @@ cudf::detail::row_ir::opcode jni_to_jit_operator(jbyte jni_op_value)
     case 13: return cudf::detail::row_ir::opcode::CAST_TO_DEC64;
     case 14: return cudf::detail::row_ir::opcode::CAST_TO_DEC128;
     case 15: return cudf::detail::row_ir::opcode::RESCALE;
+    case 16: return cudf::detail::row_ir::opcode::ANSI_DIV;
+    case 17: return cudf::detail::row_ir::opcode::ANSI_MOD;
+    case 18: return cudf::detail::row_ir::opcode::CAST_TO_I64;
+    case 19: return cudf::detail::row_ir::opcode::ANSI_TRY_ADD;
+    case 20: return cudf::detail::row_ir::opcode::ANSI_TRY_SUB;
+    case 21: return cudf::detail::row_ir::opcode::ANSI_TRY_MUL;
+    case 22: return cudf::detail::row_ir::opcode::ANSI_TRY_DIV;
+    case 23: return cudf::detail::row_ir::opcode::ANSI_TRY_MOD;
+    case 24: return cudf::detail::row_ir::opcode::ANSI_TRY_ABS;
+    case 25: return cudf::detail::row_ir::opcode::ANSI_TRY_NEG;
+    case 26: return cudf::detail::row_ir::opcode::CAST_TO_B8;
+    case 27: return cudf::detail::row_ir::opcode::CAST_TO_I8;
+    case 28: return cudf::detail::row_ir::opcode::CAST_TO_I16;
+    case 29: return cudf::detail::row_ir::opcode::CAST_TO_I32;
+    case 30: return cudf::detail::row_ir::opcode::CAST_TO_U8;
+    case 31: return cudf::detail::row_ir::opcode::CAST_TO_U16;
+    case 32: return cudf::detail::row_ir::opcode::CAST_TO_U32;
+    case 33: return cudf::detail::row_ir::opcode::CAST_TO_U64;
+    case 34: return cudf::detail::row_ir::opcode::CAST_TO_F32;
+    case 35: return cudf::detail::row_ir::opcode::CAST_TO_F64;
+    case 36: return cudf::detail::row_ir::opcode::IF_ELSE;
     default: throw std::invalid_argument("unexpected JNI AST JIT operator value");
   }
 }
