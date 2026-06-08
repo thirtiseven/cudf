@@ -139,7 +139,7 @@ __device__ inline errc if_else(optional<T>* out,
                                optional<bool> const* pred)
 {
   if (pred->has_value() && true_value->has_value() && false_value->has_value()) {
-    if_else<T>(&out->value(), &pred->value(), &true_value->value(), &false_value->value());
+    if_else<T>(&out->value(), &true_value->value(), &false_value->value(), &pred->value());
   } else {
     *out = nullopt;
   }

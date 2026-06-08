@@ -385,9 +385,9 @@ public class CompiledExpressionTest extends CudfTestBase {
   @Test
   void testJitIfElseTransform() {
     try (Table t = new Table.TestBuilder()
-        .column(1, 2, 3, 4)
-        .column(10, 20, 30, 40)
-        .column(true, false, true, false)
+        .column(1, 2, 3, null, 5)
+        .column(10, 20, null, 40, 50)
+        .column(true, false, true, true, null)
         .build()) {
       JitOperation expr = new JitOperation(JitOperator.IF_ELSE,
           new ColumnReference(0),
@@ -395,7 +395,7 @@ public class CompiledExpressionTest extends CudfTestBase {
           new ColumnReference(2));
       try (CompiledExpression compiledExpr = expr.compile();
            ColumnVector actual = compiledExpr.computeColumn(t);
-           ColumnVector expected = ColumnVector.fromBoxedInts(1, 20, 3, 40)) {
+           ColumnVector expected = ColumnVector.fromBoxedInts(1, 20, null, null, null)) {
         assertColumnsAreEqual(expected, actual);
       }
     }
