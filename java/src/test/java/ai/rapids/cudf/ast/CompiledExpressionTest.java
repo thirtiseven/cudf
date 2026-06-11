@@ -395,7 +395,26 @@ public class CompiledExpressionTest extends CudfTestBase {
           new ColumnReference(2));
       try (CompiledExpression compiledExpr = expr.compile();
            ColumnVector actual = compiledExpr.computeColumn(t);
-           ColumnVector expected = ColumnVector.fromBoxedInts(1, 20, null, null, null)) {
+           ColumnVector expected = ColumnVector.fromBoxedInts(1, 20, 3, null, null)) {
+        assertColumnsAreEqual(expected, actual);
+      }
+    }
+  }
+
+  @Test
+  void testJitIfElsePredicateTransform() {
+    try (Table t = new Table.TestBuilder()
+        .column(1, 2, 3, null, 5)
+        .column(10, 20, null, 40, 50)
+        .column(true, false, true, true, null)
+        .build()) {
+      JitOperation expr = new JitOperation(JitOperator.IF_ELSE,
+          new ColumnReference(0),
+          new ColumnReference(1),
+          new JitOperation(JitOperator.PREDICATE, new ColumnReference(2)));
+      try (CompiledExpression compiledExpr = expr.compile();
+           ColumnVector actual = compiledExpr.computeColumn(t);
+           ColumnVector expected = ColumnVector.fromBoxedInts(1, 20, 3, null, 50)) {
         assertColumnsAreEqual(expected, actual);
       }
     }
