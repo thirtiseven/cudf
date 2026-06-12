@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -214,6 +215,33 @@ cudf::detail::row_ir::opcode jni_to_jit_operator(jbyte jni_op_value)
     case 7: return cudf::detail::row_ir::opcode::COALESCE;
     case 8: return cudf::detail::row_ir::opcode::NULLIFY_IF;
     case 9: return cudf::detail::row_ir::opcode::PREDICATE;
+    case 10: return cudf::detail::row_ir::opcode::ANSI_PRECISION_CHECK;
+    case 11: return cudf::detail::row_ir::opcode::ANSI_TRY_PRECISION_CHECK;
+    case 12: return cudf::detail::row_ir::opcode::CAST_TO_DEC32;
+    case 13: return cudf::detail::row_ir::opcode::CAST_TO_DEC64;
+    case 14: return cudf::detail::row_ir::opcode::CAST_TO_DEC128;
+    case 15: return cudf::detail::row_ir::opcode::RESCALE;
+    case 16: return cudf::detail::row_ir::opcode::ANSI_DIV;
+    case 17: return cudf::detail::row_ir::opcode::ANSI_MOD;
+    case 18: return cudf::detail::row_ir::opcode::CAST_TO_I64;
+    case 19: return cudf::detail::row_ir::opcode::ANSI_TRY_ADD;
+    case 20: return cudf::detail::row_ir::opcode::ANSI_TRY_SUB;
+    case 21: return cudf::detail::row_ir::opcode::ANSI_TRY_MUL;
+    case 22: return cudf::detail::row_ir::opcode::ANSI_TRY_DIV;
+    case 23: return cudf::detail::row_ir::opcode::ANSI_TRY_MOD;
+    case 24: return cudf::detail::row_ir::opcode::ANSI_TRY_ABS;
+    case 25: return cudf::detail::row_ir::opcode::ANSI_TRY_NEG;
+    case 26: return cudf::detail::row_ir::opcode::CAST_TO_B8;
+    case 27: return cudf::detail::row_ir::opcode::CAST_TO_I8;
+    case 28: return cudf::detail::row_ir::opcode::CAST_TO_I16;
+    case 29: return cudf::detail::row_ir::opcode::CAST_TO_I32;
+    case 30: return cudf::detail::row_ir::opcode::CAST_TO_U8;
+    case 31: return cudf::detail::row_ir::opcode::CAST_TO_U16;
+    case 32: return cudf::detail::row_ir::opcode::CAST_TO_U32;
+    case 33: return cudf::detail::row_ir::opcode::CAST_TO_U64;
+    case 34: return cudf::detail::row_ir::opcode::CAST_TO_F32;
+    case 35: return cudf::detail::row_ir::opcode::CAST_TO_F64;
+    case 36: return cudf::detail::row_ir::opcode::IF_ELSE;
     default: throw std::invalid_argument("unexpected JNI AST JIT operator value");
   }
 }
@@ -380,13 +408,21 @@ cudf::ast::expression& compile_jit_expression(cudf::jni::ast::compiled_expr& com
   auto const opcode = jni_to_jit_operator(jni_ast.read_byte());
   auto const arity  = static_cast<int32_t>(jni_ast.read_byte());
   if (arity < 0) { throw std::invalid_argument("unexpected JNI AST JIT operator arity"); }
+  auto const has_target_scale = jni_ast.read_byte();
+  std::optional<int32_t> target_scale;
+  if (has_target_scale != 0) { target_scale = jni_ast.read<int32_t>(); }
   std::vector<std::reference_wrapper<cudf::ast::expression const>> args;
   args.reserve(arity);
   for (int32_t index = 0; index < arity; ++index) {
     args.emplace_back(compile_expression(compiled_expr, jni_ast));
   }
-  return compiled_expr.add_expression(
-    std::make_unique<cudf::ast::jit::detail::operation>(opcode, std::move(args)));
+  if (target_scale.has_value()) {
+    return compiled_expr.add_expression(std::make_unique<cudf::ast::jit::detail::operation>(
+      opcode, std::move(args), target_scale.value()));
+  } else {
+    return compiled_expr.add_expression(
+      std::make_unique<cudf::ast::jit::detail::operation>(opcode, std::move(args)));
+  }
 }
 
 /** Decode a serialized AST expression by reading the expression type and dispatching */

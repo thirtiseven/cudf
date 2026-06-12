@@ -9,8 +9,18 @@
 
 #include <jit/cache.hpp>
 
+#include <string>
+
 namespace cudf {
 namespace jit {
+namespace {
+
+bool is_jitify_deserialization_failure(jitify2::Kernel const& kernel)
+{
+  return !kernel && kernel.error().find("Deserialization failed") != std::string::npos;
+}
+
+}  // namespace
 
 bool is_scalar(cudf::size_type base_column_size, cudf::size_type column_size)
 {
@@ -111,8 +121,18 @@ jitify2::Kernel get_udf_kernel(jitify2::PreprocessedProgramData const& preproces
     options.push_back(opt);
   }
 
-  return cudf::jit::get_program_cache(preprocessed_program_data)
-    .get_kernel(kernel_name, {}, {{"cudf/detail/operation-udf.hpp", cuda_source}}, options);
+  auto& cache = cudf::jit::get_program_cache(preprocessed_program_data);
+  auto const get_kernel = [&] {
+    return cache.get_kernel(
+      kernel_name, {}, {{"cudf/detail/operation-udf.hpp", cuda_source}}, options);
+  };
+
+  auto kernel = get_kernel();
+  if (is_jitify_deserialization_failure(kernel)) {
+    // Corrupt file-cache entries otherwise poison all later runs until manual cleanup.
+    if (cache.clear()) { kernel = get_kernel(); }
+  }
+  return kernel;
 }
 
 }  // namespace jit

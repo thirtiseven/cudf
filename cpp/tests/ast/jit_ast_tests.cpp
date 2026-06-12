@@ -48,12 +48,16 @@ template <typename T>
 struct JITSignedIntegerArithmeticTest : public JITIntegerArithmeticTest<T> {};
 
 template <typename T>
+struct JITFloatingPointArithmeticTest : public cudf::test::BaseFixture {};
+
+template <typename T>
 struct JITDecimalArithmeticTest : public JITIntegerArithmeticTest<typename T::rep> {};
 
 using SignedIntegralTypesNotBool = cudf::test::Types<int8_t, int16_t, int32_t, int64_t>;
 
 TYPED_TEST_SUITE(JITIntegerArithmeticTest, cudf::test::IntegralTypesNotBool);
 TYPED_TEST_SUITE(JITSignedIntegerArithmeticTest, SignedIntegralTypesNotBool);
+TYPED_TEST_SUITE(JITFloatingPointArithmeticTest, cudf::test::FloatingPointTypes);
 TYPED_TEST_SUITE(JITDecimalArithmeticTest, cudf::test::FixedPointTypes);
 
 TEST_F(JITExpressionTest, NullifyIf)
@@ -330,15 +334,58 @@ TYPED_TEST(JITIntegerArithmeticTest, AnsiMod)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_fail, result_fail->view(), VERBOSITY);
 }
 
+TYPED_TEST(JITSignedIntegerArithmeticTest, AnsiModSignedRemainder)
+{
+  using T       = TypeParam;
+  auto a        = column_wrapper<T>{{T{-5}, T{5}, T{-5}, T{5}}};
+  auto b        = column_wrapper<T>{{T{3}, T{-3}, T{-3}, T{3}}};
+  auto expected = column_wrapper<T>{{T{-2}, T{2}, T{-2}, T{2}}};
+  auto table    = cudf::table_view{{a, b}};
+  auto a_ref    = cudf::ast::column_reference(0);
+  auto b_ref    = cudf::ast::column_reference(1);
+  auto tree     = cudf::ast::tree{};
+  auto& mod     = cudf::ast::jit::ansi_mod(tree, a_ref, b_ref);
+  auto result   = cudf::compute_column_jit(table, mod);
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view(), VERBOSITY);
+}
+
+TYPED_TEST(JITFloatingPointArithmeticTest, AnsiMod)
+{
+  using T            = TypeParam;
+  auto a             = column_wrapper<T>{{T{3.0}, T{20.0}, T{-5.5}, T{5.5}, T{-5.5}}};
+  auto b             = column_wrapper<T>{{T{10.0}, T{7.0}, T{2.0}, T{-2.0}, T{-2.0}}};
+  auto b_fail        = column_wrapper<T>{{T{10.0}, T{0.0}, T{2.0}, T{0.0}, T{-2.0}}};
+  auto expected      = column_wrapper<T>{{T{3.0}, T{6.0}, T{-1.5}, T{1.5}, T{-1.5}}};
+  auto expected_fail = column_wrapper<T>{
+    {T{3.0}, T{0.0}, T{-1.5}, T{0.0}, T{-1.5}}, {1, 0, 1, 0, 1}};
+  auto table         = cudf::table_view{{a, b, b_fail}};
+  auto a_ref         = cudf::ast::column_reference(0);
+  auto b_ref         = cudf::ast::column_reference(1);
+  auto b_fail_ref    = cudf::ast::column_reference(2);
+  auto tree          = cudf::ast::tree{};
+  auto& mod          = cudf::ast::jit::ansi_mod(tree, a_ref, b_ref);
+  auto& mod_fail     = cudf::ast::jit::ansi_mod(tree, a_ref, b_fail_ref);
+  auto& try_mod_fail = cudf::ast::jit::ansi_try_mod(tree, a_ref, b_fail_ref);
+  auto result        = cudf::compute_column_jit(table, mod);
+  auto result_fail   = cudf::compute_column_jit(table, try_mod_fail);
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view(), VERBOSITY);
+
+  EXPECT_THROW(result = cudf::compute_column_jit(table, mod_fail), std::overflow_error);
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_fail, result_fail->view(), VERBOSITY);
+}
+
 TYPED_TEST(JITDecimalArithmeticTest, AnsiMod)
 {
   using T       = TypeParam;
-  auto a        = decimal_column_wrapper<T>{{3, 20, 1, 50}, numeric::scale_type{0}};
-  auto b        = decimal_column_wrapper<T>{{10, 7, 2, 1}, numeric::scale_type{0}};
-  auto b_fail   = decimal_column_wrapper<T>{{10, 1, 20, 0}, numeric::scale_type{0}};
-  auto expected = decimal_column_wrapper<T>{{3, 6, 1, 0}, numeric::scale_type{0}};
+  auto a        = decimal_column_wrapper<T>{{3, 20, 1, 50, -5, 5, -5}, numeric::scale_type{0}};
+  auto b        = decimal_column_wrapper<T>{{10, 7, 2, 1, 3, -3, -3}, numeric::scale_type{0}};
+  auto b_fail   = decimal_column_wrapper<T>{{10, 1, 20, 0, 1, 1, 1}, numeric::scale_type{0}};
+  auto expected = decimal_column_wrapper<T>{{3, 6, 1, 0, -2, 2, -2}, numeric::scale_type{0}};
   auto expected_fail =
-    decimal_column_wrapper<T>{{3, 0, 1, 0}, {1, 1, 1, 0}, numeric::scale_type{0}};
+    decimal_column_wrapper<T>{{3, 0, 1, 0, 0, 0, 0}, {1, 1, 1, 0, 1, 1, 1}, numeric::scale_type{0}};
   auto table         = cudf::table_view{{a, b, b_fail}};
   auto a_ref         = cudf::ast::column_reference(0);
   auto b_ref         = cudf::ast::column_reference(1);

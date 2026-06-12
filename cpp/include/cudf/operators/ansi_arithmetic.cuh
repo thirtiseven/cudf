@@ -311,9 +311,7 @@ template <typename T>
 __device__ inline errc ansi_mod(T* out, T const* a, T const* b)
 {
   if (*b == 0) { return errc::DIVISION_BY_ZERO; }
-  T r = *a % *b;
-  if (r != 0 && ((r > 0) != (*b > 0))) { r += *b; }
-  *out = r;
+  *out = *a % *b;
   return errc::OK;
 }
 
@@ -329,14 +327,14 @@ __device__ inline errc ansi_mod(T* out, T const* a, T const* b)
 __device__ inline errc ansi_mod(float* out, float const* a, float const* b)
 {
   if (*b == 0) { return errc::DIVISION_BY_ZERO; }
-  *out = (*a) - (*b) * ::floorf((*a) / (*b));
+  *out = ::fmodf(*a, *b);
   return errc::OK;
 }
 
 __device__ inline errc ansi_mod(double* out, double const* a, double const* b)
 {
   if (*b == 0) { return errc::DIVISION_BY_ZERO; }
-  *out = (*a) - (*b) * ::floor((*a) / (*b));
+  *out = ::fmod(*a, *b);
   return errc::OK;
 }
 
@@ -350,7 +348,11 @@ __device__ inline errc ansi_mod(decimal<R>* out, decimal<R> const* a, decimal<R>
   if (errc e = ansi_div(&div, a, b); e != errc::OK) { return e; }
 
   decimal<R> quotient;
-  floor(&quotient, &div);
+  if (div.value() < 0) {
+    ceil(&quotient, &div);
+  } else {
+    floor(&quotient, &div);
+  }
   *out = *a - *b * quotient;
   return errc::OK;
 }
