@@ -47,6 +47,19 @@ expression const& coalesce(ast::tree& tree, expression const& a, expression cons
 expression const& predicate(ast::tree& tree, expression const& condition);
 
 /**
+ * @brief Creates an expression that selects one of two values based on a predicate.
+ * @param tree The expression tree to which this expression will be added
+ * @param true_value Value selected when @p predicate is true
+ * @param false_value Value selected when @p predicate is false
+ * @param predicate The selection predicate
+ * @return An expression representing the selected value
+ */
+expression const& if_else(ast::tree& tree,
+                          expression const& true_value,
+                          expression const& false_value,
+                          expression const& predicate);
+
+/**
  * @brief Creates an expression that performs ANSI-compliant addition of `a` and `b`, which throws
  * an error on overflow.
  * @param tree The expression tree to which this expression will be added

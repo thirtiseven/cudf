@@ -58,6 +58,14 @@ expression const& jit::predicate(ast::tree& tree, expression const& condition)
   return tree.push(detail::operation(opcode::PREDICATE, {condition}));
 }
 
+expression const& jit::if_else(ast::tree& tree,
+                               expression const& true_value,
+                               expression const& false_value,
+                               expression const& predicate)
+{
+  return tree.push(detail::operation(opcode::IF_ELSE, {true_value, false_value, predicate}));
+}
+
 std::tuple<opcode, bool> resolve_op(opcode default_op, opcode ansi_op, jit::compliance_mode mode)
 {
   switch (mode) {

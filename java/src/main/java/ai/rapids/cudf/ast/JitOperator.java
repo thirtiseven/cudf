@@ -9,7 +9,7 @@ import java.nio.ByteBuffer;
 
 /**
  * Enumeration of AST JIT operators backed by libcudf row IR opcodes.
- * NOTE: This must be kept in sync with `jni_to_jit_operator` in CompiledExpression.cpp!
+ * NOTE: This must be kept in sync with `compile_jit_expression` in CompiledExpression.cpp!
  */
 public enum JitOperator {
   ADD(0, 2, true, false),
