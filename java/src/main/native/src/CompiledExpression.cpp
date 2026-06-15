@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -7,13 +7,18 @@
 #include "jni_compiled_expr.hpp"
 
 #include <cudf/ast/expressions.hpp>
+#include <cudf/ast/jit/expressions.hpp>
+#include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/types.hpp>
 
+#include <ast/jit/expressions.hpp>
+
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -98,7 +103,8 @@ class jni_serialized_ast {
         return cudf::data_type(dtype_id);
       }
       case cudf::type_id::DECIMAL32:
-      case cudf::type_id::DECIMAL64: {
+      case cudf::type_id::DECIMAL64:
+      case cudf::type_id::DECIMAL128: {
         int32_t const scale = read_byte();
         return cudf::data_type(dtype_id, scale);
       }
@@ -116,7 +122,8 @@ enum class jni_serialized_expression_type : int8_t {
   NULL_LITERAL     = 1,
   COLUMN_REFERENCE = 2,
   UNARY_OPERATION  = 3,
-  BINARY_OPERATION = 4
+  BINARY_OPERATION = 4,
+  JIT_OPERATION    = 5
 };
 
 /**
@@ -190,6 +197,136 @@ cudf::ast::ast_operator jni_to_binary_operator(jbyte jni_op_value)
     case 21: return cudf::ast::ast_operator::LOGICAL_OR;
     case 22: return cudf::ast::ast_operator::NULL_LOGICAL_OR;
     default: throw std::invalid_argument("unexpected JNI AST binary operator value");
+  }
+}
+
+/**
+ * Convert a Java AST serialized byte representing a JIT compliance mode into the
+ * corresponding libcudf JIT compliance mode.
+ * NOTE: This must be kept in sync with the enumeration in JitComplianceMode.java!
+ */
+cudf::ast::jit::compliance_mode jni_to_jit_compliance_mode(jbyte jni_mode_value)
+{
+  switch (jni_mode_value) {
+    case 0: return cudf::ast::jit::compliance_mode::DEFAULT;
+    case 1: return cudf::ast::jit::compliance_mode::ANSI;
+    case 2: return cudf::ast::jit::compliance_mode::ANSI_TRY;
+    default: throw std::invalid_argument("unexpected JNI AST JIT compliance mode value");
+  }
+}
+
+struct jni_jit_operator {
+  cudf::detail::row_ir::opcode op;
+  bool nullify_on_error;
+};
+
+jni_jit_operator resolve_jit_operator(cudf::detail::row_ir::opcode default_op,
+                                      cudf::detail::row_ir::opcode ansi_op,
+                                      cudf::ast::jit::compliance_mode mode)
+{
+  switch (mode) {
+    case cudf::ast::jit::compliance_mode::DEFAULT: return {default_op, false};
+    case cudf::ast::jit::compliance_mode::ANSI: return {ansi_op, false};
+    case cudf::ast::jit::compliance_mode::ANSI_TRY: return {ansi_op, true};
+    default: throw std::invalid_argument("unexpected JNI AST JIT compliance mode value");
+  }
+}
+
+void expect_default_jit_compliance_mode(cudf::ast::jit::compliance_mode mode)
+{
+  if (mode != cudf::ast::jit::compliance_mode::DEFAULT) {
+    throw std::invalid_argument("unexpected compliance mode for JNI AST JIT operator");
+  }
+}
+
+/**
+ * Convert a Java AST serialized byte representing a JIT AST operator into the
+ * corresponding libcudf row IR opcode and error-nullification behavior.
+ * NOTE: This must be kept in sync with the enumeration in JitOperator.java!
+ */
+jni_jit_operator jni_to_jit_operator(jbyte jni_op_value,
+                                     cudf::ast::jit::compliance_mode mode)
+{
+  namespace row_ir = cudf::detail::row_ir;
+
+  switch (jni_op_value) {
+    case 0: return resolve_jit_operator(row_ir::opcode::ADD, row_ir::opcode::ANSI_ADD, mode);
+    case 1: return resolve_jit_operator(row_ir::opcode::SUB, row_ir::opcode::ANSI_SUB, mode);
+    case 2: return resolve_jit_operator(row_ir::opcode::MUL, row_ir::opcode::ANSI_MUL, mode);
+    case 3: return resolve_jit_operator(row_ir::opcode::DIV, row_ir::opcode::ANSI_DIV, mode);
+    case 4: return resolve_jit_operator(row_ir::opcode::MOD, row_ir::opcode::ANSI_MOD, mode);
+    case 5: return resolve_jit_operator(row_ir::opcode::ABS, row_ir::opcode::ANSI_ABS, mode);
+    case 6: return resolve_jit_operator(row_ir::opcode::NEG, row_ir::opcode::ANSI_NEG, mode);
+    case 7: {
+      if (mode == cudf::ast::jit::compliance_mode::ANSI) {
+        return {row_ir::opcode::ANSI_PRECISION_CHECK, false};
+      }
+      if (mode == cudf::ast::jit::compliance_mode::ANSI_TRY) {
+        return {row_ir::opcode::ANSI_PRECISION_CHECK, true};
+      }
+      throw std::invalid_argument("precision check requires ANSI or ANSI_TRY compliance mode");
+    }
+    case 8:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::BITWISE_SHIFT_LEFT, false};
+    case 9:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::BITWISE_SHIFT_RIGHT, false};
+    case 10:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::COALESCE, false};
+    case 11:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::PREDICATE, false};
+    case 12:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_BOOL8, false};
+    case 13:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_INT8, false};
+    case 14:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_INT16, false};
+    case 15:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_INT32, false};
+    case 16:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_INT64, false};
+    case 17:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_UINT8, false};
+    case 18:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_UINT16, false};
+    case 19:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_UINT32, false};
+    case 20:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_UINT64, false};
+    case 21:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_FLOAT32, false};
+    case 22:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_FLOAT64, false};
+    case 23:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_DECIMAL32, false};
+    case 24:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_DECIMAL64, false};
+    case 25:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::CAST_TO_DECIMAL128, false};
+    case 26:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::RESCALE, false};
+    case 27:
+      expect_default_jit_compliance_mode(mode);
+      return {row_ir::opcode::IF_ELSE, false};
+    default: throw std::invalid_argument("unexpected JNI AST JIT operator value");
   }
 }
 
@@ -294,13 +431,36 @@ struct make_literal {
   template <
     typename T,
     std::enable_if_t<!cudf::is_numeric<T>() && !cudf::is_timestamp<T>() &&
-                     !cudf::is_duration<T>() && !std::is_same_v<T, cudf::string_view>>* = nullptr>
+                     !cudf::is_duration<T>() && !cudf::is_fixed_point<T>() &&
+                     !std::is_same_v<T, cudf::string_view>>* = nullptr>
   cudf::ast::literal& operator()(cudf::data_type dtype,
                                  bool is_valid,
                                  cudf::jni::ast::compiled_expr& compiled_expr,
                                  jni_serialized_ast& jni_ast)
   {
     throw std::logic_error("Unsupported AST literal type");
+  }
+
+  /** Construct an AST literal from a fixed-point value */
+  template <typename T, std::enable_if_t<cudf::is_fixed_point<T>()>* = nullptr>
+  cudf::ast::literal& operator()(cudf::data_type dtype,
+                                 bool is_valid,
+                                 cudf::jni::ast::compiled_expr& compiled_expr,
+                                 jni_serialized_ast& jni_ast)
+  {
+    std::unique_ptr<cudf::scalar> scalar_ptr = cudf::make_fixed_point_scalar(dtype);
+    scalar_ptr->set_valid_async(is_valid);
+    if (is_valid) {
+      using rep_type = typename T::rep;
+      auto val       = jni_ast.read<rep_type>();
+      using ScalarType = cudf::scalar_type_t<T>;
+      static_cast<ScalarType*>(scalar_ptr.get())
+        ->set_value(T{numeric::scaled_integer<rep_type>{val, numeric::scale_type{dtype.scale()}}});
+    }
+
+    auto& fixed_point_scalar = static_cast<cudf::fixed_point_scalar<T>&>(*scalar_ptr);
+    return compiled_expr.add_literal(std::make_unique<cudf::ast::literal>(fixed_point_scalar),
+                                     std::move(scalar_ptr));
   }
 };
 
@@ -348,6 +508,34 @@ cudf::ast::operation& compile_binary_expression(cudf::jni::ast::compiled_expr& c
     std::make_unique<cudf::ast::operation>(ast_op, left_child, right_child));
 }
 
+/** Decode a serialized JIT AST expression */
+cudf::ast::expression& compile_jit_expression(cudf::jni::ast::compiled_expr& compiled_expr,
+                                              jni_serialized_ast& jni_ast)
+{
+  auto const op_byte = jni_ast.read_byte();
+  auto const mode    = jni_to_jit_compliance_mode(jni_ast.read_byte());
+  auto const op      = jni_to_jit_operator(op_byte, mode);
+  auto const arity   = static_cast<int32_t>(jni_ast.read_byte());
+  if (arity < 0) { throw std::invalid_argument("unexpected JNI AST JIT operator arity"); }
+  auto const has_target_scale = jni_ast.read_byte();
+  std::optional<int32_t> target_scale;
+  if (has_target_scale != 0) { target_scale = jni_ast.read<int32_t>(); }
+
+  std::vector<std::reference_wrapper<cudf::ast::expression const>> args;
+  args.reserve(arity);
+  for (int32_t index = 0; index < arity; ++index) {
+    args.emplace_back(compile_expression(compiled_expr, jni_ast));
+  }
+
+  if (target_scale.has_value()) {
+    return compiled_expr.add_expression(std::make_unique<cudf::ast::jit::detail::operation>(
+      op.op, std::move(args), target_scale.value(), op.nullify_on_error));
+  } else {
+    return compiled_expr.add_expression(std::make_unique<cudf::ast::jit::detail::operation>(
+      op.op, std::move(args), op.nullify_on_error));
+  }
+}
+
 /** Decode a serialized AST expression by reading the expression type and dispatching */
 cudf::ast::expression& compile_expression(cudf::jni::ast::compiled_expr& compiled_expr,
                                           jni_serialized_ast& jni_ast)
@@ -364,6 +552,8 @@ cudf::ast::expression& compile_expression(cudf::jni::ast::compiled_expr& compile
       return compile_unary_expression(compiled_expr, jni_ast);
     case jni_serialized_expression_type::BINARY_OPERATION:
       return compile_binary_expression(compiled_expr, jni_ast);
+    case jni_serialized_expression_type::JIT_OPERATION:
+      return compile_jit_expression(compiled_expr, jni_ast);
     default: throw std::invalid_argument("data is not a serialized AST expression");
   }
 }
