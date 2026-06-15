@@ -370,15 +370,11 @@ struct make_literal {
                                  cudf::jni::ast::compiled_expr& compiled_expr,
                                  jni_serialized_ast& jni_ast)
   {
-    std::unique_ptr<cudf::scalar> scalar_ptr = cudf::make_fixed_point_scalar(dtype);
+    using rep_type = typename T::rep;
+    auto const val = is_valid ? jni_ast.read<rep_type>() : rep_type{};
+    std::unique_ptr<cudf::scalar> scalar_ptr =
+      cudf::make_fixed_point_scalar<T>(val, numeric::scale_type{dtype.scale()});
     scalar_ptr->set_valid_async(is_valid);
-    if (is_valid) {
-      using rep_type = typename T::rep;
-      auto val       = jni_ast.read<rep_type>();
-      using ScalarType = cudf::scalar_type_t<T>;
-      static_cast<ScalarType*>(scalar_ptr.get())
-        ->set_value(T{numeric::scaled_integer<rep_type>{val, numeric::scale_type{dtype.scale()}}});
-    }
 
     auto& fixed_point_scalar = static_cast<cudf::fixed_point_scalar<T>&>(*scalar_ptr);
     return compiled_expr.add_literal(std::make_unique<cudf::ast::literal>(fixed_point_scalar),
