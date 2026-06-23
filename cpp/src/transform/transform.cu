@@ -457,6 +457,8 @@ void run_lto(std::optional<std::tuple<std::span<uint8_t const>, lto_binary_type,
              void* user_data,
              std::span<input_column_view const> inputs,
              std::span<output_column const> outputs,
+             int32_t* d_max_error,
+             errc* d_row_errors,
              std::span<uint8_t const> udf_binary,
              lto_binary_type source_type,
              rmm::cuda_stream_view stream,
@@ -496,7 +498,8 @@ void run_lto(std::optional<std::tuple<std::span<uint8_t const>, lto_binary_type,
   auto* input_cols     = reinterpret_cast<column_device_view_core const*>(cols.data());
   auto* output_cols =
     reinterpret_cast<mutable_column_device_view_core const*>(input_cols + inputs.size());
-  return launch(kernel, row_size, d_stencil, user_data, input_cols, output_cols, stream);
+  return launch(
+    kernel, row_size, d_stencil, user_data, input_cols, output_cols, d_max_error, d_row_errors, stream);
 }
 
 }  // namespace jit_transform
@@ -1225,6 +1228,8 @@ std::unique_ptr<table> transform_lto(std::span<uint8_t const> udf,
   auto stencil_arg               = stencil.has_value() ? stencil->first : nullptr;
   auto stencil_has_nulls         = stencil.has_value() ? (stencil->second > 0) : false;
 
+  rmm::device_scalar<int32_t> d_max_error(static_cast<int32_t>(errc::SUCCESS), stream, mr);
+
   auto precompiled_kernel_fragment = dispatch_lto_kernel_fragment(
     is_null_aware == null_aware::YES, user_data.has_value(), inputs, output_columns);
   jit_transform::run_lto(precompiled_kernel_fragment,
@@ -1235,10 +1240,21 @@ std::unique_ptr<table> transform_lto(std::span<uint8_t const> udf,
                          user_data.value_or(nullptr),
                          inputs,
                          output_columns,
+                         d_max_error.data(),
+                         nullptr,
                          udf,
                          binary_type,
                          stream,
                          mr);
+  auto error = static_cast<errc>(d_max_error.value(stream));
+
+  switch (error) {
+    case errc::SUCCESS: break;
+    default:
+      throw evaluation_error(
+        error, std::nullopt, std::format("Transform UDF evaluation failed with error `{}`", to_string(error)));
+  }
+
   auto finalized = finalize_outputs(is_null_aware, row_size, std::move(output_columns), stream, mr);
   return std::make_unique<table>(std::move(finalized));
 }
