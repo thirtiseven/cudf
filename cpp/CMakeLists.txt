@@ -1,6 +1,6 @@
 # =============================================================================
 # cmake-format: off
-# SPDX-FileCopyrightText: Copyright (c) 2018-2026, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2018-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # cmake-format: on
 # =============================================================================
@@ -407,6 +407,9 @@ include(cmake/thirdparty/get_nanoarrow.cmake)
 # find thread_pool
 include(cmake/thirdparty/get_thread_pool.cmake)
 
+# find xxhash
+include(cmake/thirdparty/get_xxhash.cmake)
+
 # find zstd
 include(cmake/thirdparty/get_zstd.cmake)
 
@@ -487,6 +490,183 @@ foreach(INC_DIR IN LISTS LIBCUDACXX_RAW_INCLUDE_DIRS)
 endforeach()
 
 embed(cudf_cuda_embed COMPRESSION zstd OUTPUT_DIRECTORY "${CUDF_GENERATED_INCLUDE_DIR}/rtcx_embed")
+
+# This macro is used to create object libraries for JIT compilation fragments, and embed them as
+# fatbins in the final library. It compiles the specified source file with the appropriate flags to
+# generate a fatbin containing the specified kernel instance, and then embeds that fatbin in the
+# final library with metadata that allows it to be looked up at runtime.
+macro(add_fragment)
+  set(TARGET ${ARGV0})
+  set(ONE_VALUE_ARGS FRAGMENT SOURCE KERNEL_ONLY KERNEL_INSTANCE UDF_TYPE)
+  set(MULTI_VALUE_ARGS DEFINITIONS ARRAY_IDS ARRAY_VALUES)
+  cmake_parse_arguments(ARG "${OPTIONS}" "${ONE_VALUE_ARGS}" "${MULTI_VALUE_ARGS}" ${ARGN})
+
+  if(NOT ARG_FRAGMENT)
+    message(FATAL_ERROR "add_fragment requires FRAGMENT argument")
+  endif()
+
+  if(NOT ARG_SOURCE)
+    message(FATAL_ERROR "add_fragment requires SOURCE argument")
+  endif()
+
+  set(OBJECT_ID ${TARGET}_${ARG_FRAGMENT})
+  add_library(${OBJECT_ID} OBJECT ${ARG_SOURCE})
+  target_compile_options(${OBJECT_ID} PRIVATE --compress-mode=size)
+
+  if(DEFINED ARG_KERNEL_ONLY AND ARG_KERNEL_ONLY)
+    # ensure that the FATBIN symbols only contain the specified kernel
+    target_compile_options(${OBJECT_ID} PRIVATE -Xnvlink=--kernels-used=cudf_kernel_entry)
+  endif()
+
+  set(INSTANTIATION_DIR "${CUDF_GENERATED_INCLUDE_DIR}/${TARGET}/instantiations/${ARG_FRAGMENT}")
+  target_include_directories(${OBJECT_ID} PRIVATE ${INSTANTIATION_DIR})
+
+  if(ARG_KERNEL_INSTANCE)
+    file(
+      GENERATE
+      OUTPUT "${INSTANTIATION_DIR}/cudf/detail/kernel_instance.cuh"
+      CONTENT "#pragma once\n#define CUDF_KERNEL_INSTANCE ${ARG_KERNEL_INSTANCE}"
+    )
+  endif()
+
+  if(ARG_UDF_TYPE)
+    file(
+      GENERATE
+      OUTPUT "${INSTANTIATION_DIR}/cudf/detail/operation_udf.cuh"
+      CONTENT "#pragma once\n#define CUDF_UDF_TYPE ${ARG_UDF_TYPE}"
+    )
+  endif()
+
+  target_compile_definitions(${OBJECT_ID} PRIVATE CUDF_DISABLE_EXPORTS ${ARG_DEFINITIONS})
+  set_target_properties(
+    ${OBJECT_ID}
+    PROPERTIES CUDA_SEPARABLE_COMPILATION ON
+               CUDA_FATBIN_COMPILATION ON
+               POSITION_INDEPENDENT_CODE ON
+               INTERPROCEDURAL_OPTIMIZATION ON
+               CXX_STANDARD 20
+               CXX_STANDARD_REQUIRED ON
+               CXX_EXTENSIONS ON
+               CXX_VISIBILITY_PRESET hidden
+               CUDA_STANDARD 20
+               CUDA_STANDARD_REQUIRED ON
+               CUDA_VISIBILITY_PRESET hidden
+  )
+  target_link_libraries(
+    ${OBJECT_ID}
+    PUBLIC CCCL::CCCL rapids_logger::rapids_logger rmm::rmm $<BUILD_LOCAL_INTERFACE:BS::thread_pool>
+    PRIVATE $<BUILD_LOCAL_INTERFACE:nvtx3::nvtx3-cpp> $<BUILD_LOCAL_INTERFACE:cuco::cuco>
+            ZLIB::ZLIB nvcomp::nvcomp kvikio::kvikio nanoarrow::nanoarrow zstd
+  )
+  target_include_directories(
+    ${OBJECT_ID} PRIVATE "$<BUILD_INTERFACE:${CUDF_SOURCE_DIR}/include>"
+                         "$<BUILD_INTERFACE:${CUDF_SOURCE_DIR}/src>"
+  )
+  target_compile_options(${OBJECT_ID} PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:${CUDF_CUDA_FLAGS}>")
+
+  embed_blob(
+    ${TARGET} FILE $<TARGET_OBJECTS:${OBJECT_ID}> DEST fragments/${ARG_FRAGMENT}.fatbin ID
+    ${ARG_FRAGMENT} ARRAY_IDS ${ARG_ARRAY_IDS} ARRAY_VALUES ${ARG_ARRAY_VALUES}
+  )
+endmacro()
+
+add_embed(cudf_fragments)
+
+list(
+  APPEND
+  CUDF_PRECOMPILE_TYPES
+  uint8_t
+  uint16_t
+  uint32_t
+  uint64_t
+  int8_t
+  int16_t
+  int32_t
+  int64_t
+  float
+  double
+  numeric::decimal32
+  numeric::decimal64
+  numeric::decimal128
+  cudf::timestamp_D
+  cudf::timestamp_s
+  cudf::timestamp_ms
+  cudf::timestamp_us
+  cudf::timestamp_ns
+  cudf::duration_D
+  cudf::duration_s
+  cudf::duration_ms
+  cudf::duration_us
+  cudf::duration_ns
+)
+
+foreach(TYPE IN ITEMS ${CUDF_PRECOMPILE_TYPES})
+  set(FRAGMENT_NAME transform_kernel)
+  get_property(
+    FILE_INDEX
+    TARGET cudf_fragments__embed_props
+    PROPERTY EMBED_FILE_INDEX
+  )
+  set(VARIANT_NAME transform_kernel_${FILE_INDEX})
+  set(INSTANCE
+      "cudf::jit::transform_kernel<false, false, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::column_device_view_core, ${TYPE}, false, 0>>, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::mutable_column_device_view_core, ${TYPE}, false, 0>>>"
+  )
+  add_fragment(
+    cudf_fragments
+    FRAGMENT
+    ${VARIANT_NAME}
+    SOURCE
+    src/transform/jit/kernel.cu
+    KERNEL_INSTANCE
+    ${INSTANCE}
+    UDF_TYPE
+    "int(${TYPE} *, ${TYPE})"
+    DEFINITIONS
+    CUDF_LTO_MODE
+    ARRAY_IDS
+    ${FRAGMENT_NAME}_FILE_INDEX
+    ${FRAGMENT_NAME}_INSTANCE
+    ARRAY_VALUES
+    ${FILE_INDEX}
+    "${INSTANCE}"
+  )
+endforeach()
+
+foreach(TYPE IN ITEMS ${CUDF_PRECOMPILE_TYPES})
+  foreach(RHS_IS_SCALAR IN ITEMS "false" "true")
+    set(FRAGMENT_NAME transform_kernel)
+    get_property(
+      FILE_INDEX
+      TARGET cudf_fragments__embed_props
+      PROPERTY EMBED_FILE_INDEX
+    )
+    set(VARIANT_NAME transform_kernel_${FILE_INDEX})
+    set(INSTANCE
+        "cudf::jit::transform_kernel<false, false, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::column_device_view_core, ${TYPE}, false, 0>, cudf::jit::column_accessor<1ULL, cudf::column_device_view_core, ${TYPE}, ${RHS_IS_SCALAR}, 0>>, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::mutable_column_device_view_core, ${TYPE}, false, 0>>>"
+    )
+    add_fragment(
+      cudf_fragments
+      FRAGMENT
+      ${VARIANT_NAME}
+      SOURCE
+      src/transform/jit/kernel.cu
+      KERNEL_INSTANCE
+      ${INSTANCE}
+      UDF_TYPE
+      "int(${TYPE} *, ${TYPE}, ${TYPE})"
+      DEFINITIONS
+      CUDF_LTO_MODE
+      ARRAY_IDS
+      ${FRAGMENT_NAME}_FILE_INDEX
+      ${FRAGMENT_NAME}_INSTANCE
+      ARRAY_VALUES
+      ${FILE_INDEX}
+      "${INSTANCE}"
+    )
+  endforeach()
+endforeach()
+
+embed(cudf_fragments COMPRESSION none OUTPUT_DIRECTORY "${CUDF_GENERATED_INCLUDE_DIR}/rtcx_embed")
 
 # ##################################################################################################
 # * library targets -------------------------------------------------------------------------------
@@ -1050,10 +1230,12 @@ add_library(
   src/utilities/traits.cpp
   src/utilities/type_checks.cpp
   src/utilities/type_dispatcher.cpp
+  librtcx/rtcx.cpp
   ${cudf_cuda_embed_SOURCE_DIR}/cudf_cuda_embed.s
+  ${cudf_fragments_SOURCE_DIR}/cudf_fragments.s
 )
 
-add_dependencies(cudf cudf_cuda_embed)
+add_dependencies(cudf cudf_cuda_embed cudf_fragments)
 
 set_property(
   SOURCE src/io/parquet/writer_impl.cu
@@ -1123,7 +1305,9 @@ target_include_directories(
           "$<BUILD_INTERFACE:${nanoarrow_SOURCE_DIR}/src>"
           "$<BUILD_INTERFACE:${FlatBuffers_SOURCE_DIR}/include>"
           "$<BUILD_INTERFACE:${ZSTD_INCLUDE_DIR}>"
+          "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/librtcx>"
           "$<BUILD_INTERFACE:${cudf_cuda_embed_INCLUDE_DIRS}>"
+          "$<BUILD_INTERFACE:${cudf_fragments_INCLUDE_DIRS}>"
   INTERFACE "$<INSTALL_INTERFACE:include>"
 )
 
@@ -1166,7 +1350,7 @@ target_link_libraries(
   cudf
   PUBLIC CCCL::CCCL $<BUILD_LOCAL_INTERFACE:BS::thread_pool>
   PRIVATE $<BUILD_LOCAL_INTERFACE:nvtx3::nvtx3-cpp> $<BUILD_LOCAL_INTERFACE:cuco::cuco> ZLIB::ZLIB
-          ${CUDF_nvcomp_TARGET} kvikio::kvikio ${CUDF_nanoarrow_TARGET} zstd rtcx::rtcx
+          ${CUDF_nvcomp_TARGET} kvikio::kvikio ${CUDF_nanoarrow_TARGET} zstd xxhash rtcx::rtcx
 )
 
 # When building a shared libcudf with static deps, we absorb them via whole-archive linking so that

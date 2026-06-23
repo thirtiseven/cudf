@@ -1,12 +1,16 @@
 # =============================================================================
 # cmake-format: off
-# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # cmake-format: on
 # =============================================================================
 
 if(NOT TARGET zstd)
-  message(FATAL_ERROR "embed(): zstd target is required for LIBRTCX embedding.")
+  message(FATAL_ERROR "zstd target is required for LIBRTCX embedding.")
+endif()
+
+if(NOT TARGET xxhash)
+  message(FATAL_ERROR "xxhash target is required for LIBRTCX embedding.")
 endif()
 
 # This function initializes a target for JIT embedding. It must be called before any calls to
@@ -24,6 +28,7 @@ function(add_embed TARGET)
   endif()
 
   add_library(${TARGET}__embed_props INTERFACE)
+  set_property(TARGET ${TARGET}__embed_props PROPERTY EMBED_FILE_INDEX 0)
 endfunction()
 
 # This function registers a directory of include files to be embedded for JIT compilation.
@@ -106,6 +111,15 @@ function(embed_includes TARGET)
     PROPERTY EMBED_INCLUDE_DIRECTORIES ${ARG_INCLUDE_DIRECTORIES}
   )
 
+  get_property(
+    SOURCE_FILE_IDS
+    TARGET ${TARGET}__embed_props
+    PROPERTY EMBED_SOURCE_FILE_IDS
+  )
+  list(LENGTH SOURCE_FILE_IDS IDX)
+
+  set_property(TARGET ${TARGET}__embed_props PROPERTY EMBED_FILE_INDEX ${IDX})
+
 endfunction()
 
 # This function registers a single file to be embedded for JIT compilation.
@@ -178,6 +192,15 @@ function(embed_blob TARGET)
     APPEND
     PROPERTY EMBED_SOURCE_FILE_DESTS ${ARG_DEST}
   )
+
+  get_property(
+    SOURCE_FILE_IDS
+    TARGET ${TARGET}__embed_props
+    PROPERTY EMBED_SOURCE_FILE_IDS
+  )
+  list(LENGTH SOURCE_FILE_IDS IDX)
+
+  set_property(TARGET ${TARGET}__embed_props PROPERTY EMBED_FILE_INDEX ${IDX})
 
 endfunction()
 
@@ -272,7 +295,7 @@ function(embed TARGET)
 
   set(RUNNER "${TARGET}__jit_embed_run")
   add_executable(${RUNNER} EXCLUDE_FROM_ALL "${EMBED_SCRIPT}")
-  target_link_libraries(${RUNNER} PRIVATE ${CMAKE_DL_LIBS} zstd)
+  target_link_libraries(${RUNNER} PRIVATE ${CMAKE_DL_LIBS} zstd xxhash)
   target_include_directories(
     ${RUNNER} PRIVATE ${CMAKE_CURRENT_FUNCTION_LIST_DIR} ${ZSTD_INCLUDE_DIR}
   )

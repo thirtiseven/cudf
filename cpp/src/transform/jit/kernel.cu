@@ -33,18 +33,36 @@
 #include <cudf/detail/operation_udf.cuh>
 // clang-format on
 
+#ifndef CUDF_LTO_MODE
+#define CUDF_UDF_TYPE int()
+#endif
+
+// Use LTO-dispatch for transform operators if we're in LTO mode. This allows the operator to be
+// defined in a separate translation unit and compiled with LTO, which can result in better
+// performance due to more optimization opportunities
+#ifdef CUDF_LTO_MODE
+#define GENERIC_TRANSFORM_OP(...) ::cudf::jit::lto::transform(__VA_ARGS__)
+#endif
+
 namespace cudf {
 namespace jit {
+namespace lto {
+
+using transform_type = CUDF_UDF_TYPE;
+
+extern "C" __device__ transform_type transform;
+
+}  // namespace lto
 
 /// @brief The generic transform kernel. Supports all types and nullability combinations.
 template <bool is_null_aware, bool has_user_data, typename InputAccessors, typename OutputAccessors>
-CUDF_KERNEL void transform_kernel(size_type row_size,
-                                  bitmask_type const* __restrict__ stencil,
-                                  void* __restrict__ user_data,
-                                  column_device_view_core const* __restrict__ input_cols,
-                                  mutable_column_device_view_core const* __restrict__ output_cols,
-                                  int32_t* __restrict__ max_error,
-                                  errc* __restrict__ row_errors)
+__device__ void transform_kernel(size_type row_size,
+                                 bitmask_type const* __restrict__ stencil,
+                                 void* __restrict__ user_data,
+                                 column_device_view_core const* __restrict__ input_cols,
+                                 mutable_column_device_view_core const* __restrict__ output_cols,
+                                 int32_t* __restrict__ max_error,
+                                 errc* __restrict__ row_errors)
 {
   // TODO: ensure block size is a multiple of warp size for correct warp-synchronous behavior
   auto start        = detail::grid_1d::global_thread_id();
