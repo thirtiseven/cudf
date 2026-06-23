@@ -15,6 +15,7 @@
 
 #include <cuda/std/cstddef>
 #include <cuda/std/tuple>
+#include <cuda/std/type_traits>
 #include <cuda/std/utility>
 
 #include <jit/column_accessor.cuh>
@@ -73,8 +74,14 @@ __device__ void transform_kernel(size_type row_size,
     auto operation = [&]<typename Args>(Args args) {
       // TODO: static assert invocable
       auto func = [&](auto... a) {
-        if constexpr (!cuda::std::is_void_v<decltype(GENERIC_TRANSFORM_OP(a...))>) {
-          return GENERIC_TRANSFORM_OP(a...);
+        using result_type = decltype(GENERIC_TRANSFORM_OP(a...));
+        if constexpr (!cuda::std::is_void_v<result_type>) {
+          auto result = GENERIC_TRANSFORM_OP(a...);
+          if constexpr (cuda::std::is_same_v<result_type, errc>) {
+            return result;
+          } else {
+            return static_cast<errc>(result);
+          }
         } else {
           GENERIC_TRANSFORM_OP(a...);
           return errc::SUCCESS;
@@ -111,7 +118,9 @@ __device__ void transform_kernel(size_type row_size,
 
       if (row_errors != nullptr) { row_errors[row] = row_error; }
 
-      thread_error = cuda::std::max(thread_error, row_error);
+      if (static_cast<int32_t>(row_error) > static_cast<int32_t>(thread_error)) {
+        thread_error = row_error;
+      }
     } else {
       auto active_mask = __ballot_sync(__activemask(), row < row_size);
 
@@ -135,7 +144,9 @@ __device__ void transform_kernel(size_type row_size,
 
       if (row_errors != nullptr) { row_errors[row] = row_error; }
 
-      thread_error = cuda::std::max(thread_error, row_error);
+      if (static_cast<int32_t>(row_error) > static_cast<int32_t>(thread_error)) {
+        thread_error = row_error;
+      }
     }
   }
 
