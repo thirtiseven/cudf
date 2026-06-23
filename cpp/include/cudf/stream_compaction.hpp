@@ -391,6 +391,7 @@ std::unique_ptr<table> stable_distinct(
  * @throws cudf::logic_error if JIT is not supported by the runtime
  * @throws std::invalid_argument if the size of `copy_mask` does not match the number of input
  * columns
+ * @throws cudf::evaluation_error if the UDF produces an error during execution.
  *
  * The size of the resulting column is the size of the largest column.
  *
@@ -442,6 +443,7 @@ using filter_input = std::variant<column_view, scalar_column_view>;
  * @throws cudf::logic_error if JIT is not supported by the runtime
  * @throws std::invalid_argument if the size of `copy_mask` does not match the number of input
  * columns
+ * @throws cudf::evaluation_error if the UDF produces an error during execution
  *
  * The size of the resulting column is the size of the largest column.
  *
@@ -479,6 +481,7 @@ std::vector<std::unique_ptr<column>> filter_extended(
  * @throws std::invalid_argument if the output or any of the inputs are not fixed-width or string
  * types
  * @throws cudf::logic_error if JIT is not supported by the runtime
+ * @throws cudf::evaluation_error if the UDF produces an error during execution
  *
  * @param predicate_table The table used for predicate expression evaluation
  * @param predicate_expr The predicate filter expression
