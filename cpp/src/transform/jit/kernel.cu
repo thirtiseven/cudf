@@ -65,7 +65,6 @@ __device__ void transform_kernel(size_type row_size,
                                  int32_t* __restrict__ max_error,
                                  errc* __restrict__ row_errors)
 {
-  // TODO: ensure block size is a multiple of warp size for correct warp-synchronous behavior
   auto start        = detail::grid_1d::global_thread_id();
   auto stride       = detail::grid_1d::grid_stride();
   auto thread_error = errc::SUCCESS;

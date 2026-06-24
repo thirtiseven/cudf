@@ -199,34 +199,74 @@ cudf::ast::ast_operator jni_to_binary_operator(jbyte jni_op_value)
   }
 }
 
+enum class jni_jit_compliance_mode : int8_t { DEFAULT, ANSI, ANSI_TRY };
+
 /**
- * Convert a Java AST serialized byte representing a JIT compliance mode into the
- * corresponding libcudf JIT compliance mode.
+ * Convert a Java AST serialized byte representing a JIT compliance mode.
  * NOTE: This must be kept in sync with the enumeration in JitComplianceMode.java!
  */
-cudf::ast::jit::compliance_mode jni_to_jit_compliance_mode(jbyte jni_mode_value)
+jni_jit_compliance_mode jni_to_jit_compliance_mode(jbyte jni_mode_value)
 {
   switch (jni_mode_value) {
-    case 0: return cudf::ast::jit::compliance_mode::DEFAULT;
-    case 1: return cudf::ast::jit::compliance_mode::ANSI;
-    case 2: return cudf::ast::jit::compliance_mode::ANSI_TRY;
+    case 0: return jni_jit_compliance_mode::DEFAULT;
+    case 1: return jni_jit_compliance_mode::ANSI;
+    case 2: return jni_jit_compliance_mode::ANSI_TRY;
     default: throw std::invalid_argument("unexpected JNI AST JIT compliance mode value");
   }
 }
 
-void expect_default_jit_compliance_mode(cudf::ast::jit::compliance_mode mode)
+void expect_default_jit_compliance_mode(jni_jit_compliance_mode mode)
 {
-  if (mode != cudf::ast::jit::compliance_mode::DEFAULT) {
+  if (mode != jni_jit_compliance_mode::DEFAULT) {
     throw std::invalid_argument("unexpected compliance mode for JNI AST JIT operator");
   }
 }
 
-void expect_non_default_jit_compliance_mode(cudf::ast::jit::compliance_mode mode)
+void expect_non_default_jit_compliance_mode(jni_jit_compliance_mode mode)
 {
-  if (mode == cudf::ast::jit::compliance_mode::DEFAULT) {
+  if (mode == jni_jit_compliance_mode::DEFAULT) {
     throw std::invalid_argument(
       "expected ANSI or ANSI_TRY compliance mode for JNI AST JIT operator");
   }
+}
+
+bool nullify_on_jit_error(jni_jit_compliance_mode mode)
+{
+  expect_non_default_jit_compliance_mode(mode);
+  return mode == jni_jit_compliance_mode::ANSI_TRY;
+}
+
+using binary_jit_expression = cudf::ast::expression const& (*)(
+  cudf::ast::tree&, cudf::ast::expression const&, cudf::ast::expression const&);
+using binary_overflow_jit_expression = cudf::ast::expression const& (*)(
+  cudf::ast::tree&, cudf::ast::expression const&, cudf::ast::expression const&, bool);
+
+cudf::ast::expression const& dispatch_binary_jit_expression(
+  cudf::ast::tree& tree,
+  cudf::ast::expression const& lhs,
+  cudf::ast::expression const& rhs,
+  jni_jit_compliance_mode mode,
+  binary_jit_expression default_expression,
+  binary_overflow_jit_expression overflow_expression)
+{
+  if (mode == jni_jit_compliance_mode::DEFAULT) { return default_expression(tree, lhs, rhs); }
+  return overflow_expression(tree, lhs, rhs, nullify_on_jit_error(mode));
+}
+
+using unary_jit_expression =
+  cudf::ast::expression const& (*)(cudf::ast::tree&, cudf::ast::expression const&);
+using unary_overflow_jit_expression =
+  cudf::ast::expression const& (*)(cudf::ast::tree&, cudf::ast::expression const&, bool);
+
+cudf::ast::expression const& dispatch_unary_jit_expression(
+  cudf::ast::tree& tree,
+  cudf::ast::expression const& child,
+  jni_jit_compliance_mode mode,
+  unary_jit_expression default_expression,
+  unary_overflow_jit_expression overflow_expression)
+{
+  if (mode == jni_jit_compliance_mode::DEFAULT) { return default_expression(tree, child); }
+  return overflow_expression(tree, child, nullify_on_jit_error(mode));
 }
 
 void expect_jit_arity(std::vector<std::reference_wrapper<cudf::ast::expression const>> const& args,
@@ -450,36 +490,63 @@ cudf::ast::expression const& compile_jit_expression(cudf::jni::ast::compiled_exp
         case 0:
           expect_jit_arity(args, 2);
           expect_no_target_scale(target_scale);
-          return cudf::ast::jit::add(tree, args[0].get(), args[1].get(), mode);
+          return dispatch_binary_jit_expression(tree,
+                                                args[0].get(),
+                                                args[1].get(),
+                                                mode,
+                                                cudf::ast::jit::add,
+                                                cudf::ast::jit::add_overflow);
         case 1:
           expect_jit_arity(args, 2);
           expect_no_target_scale(target_scale);
-          return cudf::ast::jit::sub(tree, args[0].get(), args[1].get(), mode);
+          return dispatch_binary_jit_expression(tree,
+                                                args[0].get(),
+                                                args[1].get(),
+                                                mode,
+                                                cudf::ast::jit::sub,
+                                                cudf::ast::jit::sub_overflow);
         case 2:
           expect_jit_arity(args, 2);
           expect_no_target_scale(target_scale);
-          return cudf::ast::jit::mul(tree, args[0].get(), args[1].get(), mode);
+          return dispatch_binary_jit_expression(tree,
+                                                args[0].get(),
+                                                args[1].get(),
+                                                mode,
+                                                cudf::ast::jit::mul,
+                                                cudf::ast::jit::mul_overflow);
         case 3:
           expect_jit_arity(args, 2);
           expect_no_target_scale(target_scale);
-          return cudf::ast::jit::div(tree, args[0].get(), args[1].get(), mode);
+          return dispatch_binary_jit_expression(tree,
+                                                args[0].get(),
+                                                args[1].get(),
+                                                mode,
+                                                cudf::ast::jit::div,
+                                                cudf::ast::jit::div_overflow);
         case 4:
           expect_jit_arity(args, 2);
           expect_no_target_scale(target_scale);
-          return cudf::ast::jit::mod(tree, args[0].get(), args[1].get(), mode);
+          return dispatch_binary_jit_expression(tree,
+                                                args[0].get(),
+                                                args[1].get(),
+                                                mode,
+                                                cudf::ast::jit::mod,
+                                                cudf::ast::jit::mod_overflow);
         case 5:
           expect_jit_arity(args, 1);
           expect_no_target_scale(target_scale);
-          return cudf::ast::jit::abs(tree, args[0].get(), mode);
+          return dispatch_unary_jit_expression(
+            tree, args[0].get(), mode, cudf::ast::jit::abs, cudf::ast::jit::abs_overflow);
         case 6:
           expect_jit_arity(args, 1);
           expect_no_target_scale(target_scale);
-          return cudf::ast::jit::neg(tree, args[0].get(), mode);
+          return dispatch_unary_jit_expression(
+            tree, args[0].get(), mode, cudf::ast::jit::neg, cudf::ast::jit::neg_overflow);
         case 7:
           expect_jit_arity(args, 2);
           expect_no_target_scale(target_scale);
-          expect_non_default_jit_compliance_mode(mode);
-          return cudf::ast::jit::precision_check(tree, args[0].get(), args[1].get(), mode);
+          return cudf::ast::jit::check_precision(
+            tree, args[0].get(), args[1].get(), nullify_on_jit_error(mode));
         case 8:
           expect_jit_arity(args, 2);
           expect_no_target_scale(target_scale);
