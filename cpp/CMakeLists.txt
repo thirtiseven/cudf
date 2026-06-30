@@ -615,7 +615,7 @@ foreach(TYPE IN ITEMS ${CUDF_PRECOMPILE_TYPES})
   )
   set(VARIANT_NAME transform_kernel_${FILE_INDEX})
   set(INSTANCE
-      "cudf::jit::transform_kernel<false, false, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::column_device_view_core, ${TYPE}, false, 0>>, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::mutable_column_device_view_core, ${TYPE}, false, 0>>>"
+      "cudf::jit::transform_kernel<false, false, false, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::column_device_view_core, ${TYPE}, false, 0>>, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::mutable_column_device_view_core, ${TYPE}, false, 0>>>"
   )
   add_fragment(
     cudf_fragments
@@ -648,7 +648,7 @@ foreach(TYPE IN ITEMS ${CUDF_PRECOMPILE_TYPES})
     )
     set(VARIANT_NAME transform_kernel_${FILE_INDEX})
     set(INSTANCE
-        "cudf::jit::transform_kernel<false, false, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::column_device_view_core, ${TYPE}, false, 0>, cudf::jit::column_accessor<1ULL, cudf::column_device_view_core, ${TYPE}, ${RHS_IS_SCALAR}, 0>>, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::mutable_column_device_view_core, ${TYPE}, false, 0>>>"
+        "cudf::jit::transform_kernel<false, false, false, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::column_device_view_core, ${TYPE}, false, 0>, cudf::jit::column_accessor<1ULL, cudf::column_device_view_core, ${TYPE}, ${RHS_IS_SCALAR}, 0>>, cudf::jit::type_list<cudf::jit::column_accessor<0ULL, cudf::mutable_column_device_view_core, ${TYPE}, false, 0>>>"
     )
     add_fragment(
       cudf_fragments
@@ -683,8 +683,8 @@ add_library(
   src/aggregation/result_cache.cpp
   src/ast/expression_parser.cpp
   src/ast/expressions.cpp
-  src/ast/operators.cpp
   src/ast/jit/expressions.cpp
+  src/ast/operators.cpp
   src/binaryop/binaryop.cpp
   src/binaryop/compiled/ATan2.cu
   src/binaryop/compiled/Add.cu

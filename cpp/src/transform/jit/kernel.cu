@@ -13,6 +13,7 @@
 #include <cudf/wrappers/durations.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
+#include <cuda/atomic>
 #include <cuda/std/cstddef>
 #include <cuda/std/tuple>
 #include <cuda/std/type_traits>
@@ -56,14 +57,17 @@ extern "C" __device__ transform_type transform;
 }  // namespace lto
 
 /// @brief The generic transform kernel. Supports all types and nullability combinations.
-template <bool is_null_aware, bool has_user_data, typename InputAccessors, typename OutputAccessors>
+template <bool is_null_aware,
+          bool discard_errors,
+          bool has_user_data,
+          typename InputAccessors,
+          typename OutputAccessors>
 __device__ void transform_kernel(size_type row_size,
                                  bitmask_type const* __restrict__ stencil,
                                  void* __restrict__ user_data,
                                  column_device_view_core const* __restrict__ input_cols,
                                  mutable_column_device_view_core const* __restrict__ output_cols,
-                                 int32_t* __restrict__ max_error,
-                                 errc* __restrict__ row_errors)
+                                 int32_t* __restrict__ max_error)
 {
   auto start        = detail::grid_1d::global_thread_id();
   auto stride       = detail::grid_1d::grid_stride();
@@ -73,16 +77,20 @@ __device__ void transform_kernel(size_type row_size,
     auto operation = [&]<typename Args>(Args args) {
       // TODO: static assert invocable
       auto func = [&](auto... a) {
-        using result_type = decltype(GENERIC_TRANSFORM_OP(a...));
-        if constexpr (!cuda::std::is_void_v<result_type>) {
-          auto result = GENERIC_TRANSFORM_OP(a...);
+        if constexpr (!discard_errors) {
+          using result_type = decltype(GENERIC_TRANSFORM_OP(a...));
+          auto result       = GENERIC_TRANSFORM_OP(a...);
           if constexpr (cuda::std::is_same_v<result_type, errc>) {
             return result;
           } else {
             return static_cast<errc>(result);
           }
         } else {
-          GENERIC_TRANSFORM_OP(a...);
+          if constexpr (!cuda::std::is_void_v<decltype(GENERIC_TRANSFORM_OP(a...))>) {
+            cuda::std::ignore = GENERIC_TRANSFORM_OP(a...);
+          } else {
+            GENERIC_TRANSFORM_OP(a...);
+          }
           return errc::SUCCESS;
         }
       };
@@ -96,7 +104,6 @@ __device__ void transform_kernel(size_type row_size,
 
     if constexpr (!is_null_aware) {
       if (stencil != nullptr && !bit_is_set(stencil, row)) {
-        if (row_errors != nullptr) { row_errors[row] = errc::SUCCESS; }
         continue;
       }
 
@@ -115,11 +122,7 @@ __device__ void transform_kernel(size_type row_size,
         (A::assign(output_cols, row, cuda::std::get<A::index>(outs)), ...);
       });
 
-      if (row_errors != nullptr) { row_errors[row] = row_error; }
-
-      if (static_cast<int32_t>(row_error) > static_cast<int32_t>(thread_error)) {
-        thread_error = row_error;
-      }
+      if constexpr (!discard_errors) { thread_error = cuda::std::max(thread_error, row_error); }
     } else {
       auto active_mask = __ballot_sync(__activemask(), row < row_size);
 
@@ -141,15 +144,14 @@ __device__ void transform_kernel(size_type row_size,
          ...);
       });
 
-      if (row_errors != nullptr) { row_errors[row] = row_error; }
-
-      if (static_cast<int32_t>(row_error) > static_cast<int32_t>(thread_error)) {
-        thread_error = row_error;
-      }
+      if constexpr (!discard_errors) { thread_error = cuda::std::max(thread_error, row_error); }
     }
   }
 
-  atomicMax(max_error, static_cast<int32_t>(thread_error));
+  if constexpr (!discard_errors) {
+    cuda::atomic_ref ref(*max_error);
+    ref.fetch_max(static_cast<int32_t>(thread_error), cuda::std::memory_order_relaxed);
+  }
 }
 
 }  // namespace jit
@@ -170,9 +172,7 @@ extern "C" __global__ void cudf_kernel_entry(
   void* __restrict__ user_data,
   cudf::column_device_view_core const* __restrict__ input_cols,
   cudf::mutable_column_device_view_core const* __restrict__ output_cols,
-  int32_t* __restrict__ max_error,
-  cudf::errc* __restrict__ row_errors)
+  int32_t* __restrict__ max_error)
 {
-  CUDF_KERNEL_INSTANCE(
-    row_size, stencil, user_data, input_cols, output_cols, max_error, row_errors);
+  CUDF_KERNEL_INSTANCE(row_size, stencil, user_data, input_cols, output_cols, max_error);
 }
