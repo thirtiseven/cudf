@@ -1232,7 +1232,7 @@ std::unique_ptr<table> transform_lto(std::span<uint8_t const> udf,
     case errc::SUCCESS: break;
     default:
       throw evaluation_error(
-        error, std::nullopt, std::format("Transform UDF evaluation failed with error `{}`", to_string(error)));
+        error, std::format("Transform UDF evaluation failed with error `{}`", to_string(error)));
   }
 
   auto finalized = finalize_outputs(is_null_aware, row_size, std::move(output_columns), stream, mr);
