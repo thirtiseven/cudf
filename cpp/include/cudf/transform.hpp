@@ -11,8 +11,10 @@
 #include <cudf/utilities/export.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
+#include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <variant>
 #include <vector>
 
@@ -365,6 +367,51 @@ std::unique_ptr<column> compute_column(
 std::unique_ptr<column> compute_column_jit(
   table_view const& table,
   ast::expression const& expr,
+  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Compute new columns by evaluating multiple expression trees on a table.
+ *
+ * When JIT execution is enabled, the expressions are lowered to one multi-output transform in the
+ * order supplied. Otherwise, each expression is evaluated by the non-JIT AST interpreter.
+ *
+ * @throws std::invalid_argument if `expressions` is empty.
+ * @throws cudf::logic_error if passed an expression operating on table_reference::RIGHT.
+ * @throws cudf::evaluation_error if the evaluation of an expression results in an error during
+ * execution.
+ *
+ * @param table The table used for expression evaluation
+ * @param expressions The roots of the expression trees
+ * @param stream CUDA stream used for device memory operations and kernel launches
+ * @param mr Device memory resource
+ * @return Table containing one output column per expression
+ */
+std::unique_ptr<table> compute_columns(
+  table_view const& table,
+  std::span<std::reference_wrapper<ast::expression const> const> expressions,
+  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Compute new columns by evaluating multiple expression trees in one JIT-compiled kernel.
+ *
+ * The expressions are lowered to one multi-output transform in the order supplied.
+ *
+ * @throws std::invalid_argument if `expressions` is empty.
+ * @throws cudf::logic_error if passed an expression operating on table_reference::RIGHT.
+ * @throws cudf::evaluation_error if the evaluation of an expression results in an error during
+ * execution.
+ *
+ * @param table The table used for expression evaluation
+ * @param expressions The roots of the expression trees
+ * @param stream CUDA stream used for device memory operations and kernel launches
+ * @param mr Device memory resource
+ * @return Table containing one output column per expression
+ */
+std::unique_ptr<table> compute_columns_jit(
+  table_view const& table,
+  std::span<std::reference_wrapper<ast::expression const> const> expressions,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 

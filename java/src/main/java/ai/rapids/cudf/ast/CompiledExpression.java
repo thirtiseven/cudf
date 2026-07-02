@@ -12,6 +12,8 @@ import ai.rapids.cudf.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Objects;
+
 /** This class wraps a native compiled AST and must be closed to avoid native memory leaks. */
 public class CompiledExpression implements AutoCloseable {
   static {
@@ -77,6 +79,31 @@ public class CompiledExpression implements AutoCloseable {
     return new ColumnVector(computeColumn(cleaner.nativeHandle, table.getNativeView()));
   }
 
+  /**
+   * Compute columns by applying the expressions to the specified table. When JIT execution is
+   * enabled, the expressions are evaluated in one multi-output transform.
+   * @param table input table for the expressions
+   * @param expressions expressions to evaluate in output order
+   * @return table containing one output column per expression
+   */
+  public static Table computeColumns(Table table, CompiledExpression[] expressions) {
+    Objects.requireNonNull(table, "table");
+    Objects.requireNonNull(expressions, "expressions");
+    if (expressions.length == 0) {
+      throw new IllegalArgumentException("At least one expression is required");
+    }
+
+    long[] nativeHandles = new long[expressions.length];
+    for (int i = 0; i < expressions.length; i++) {
+      CompiledExpression expression = Objects.requireNonNull(expressions[i], "expression");
+      nativeHandles[i] = expression.cleaner.nativeHandle;
+      if (nativeHandles[i] == 0) {
+        throw new IllegalStateException("Expression is closed");
+      }
+    }
+    return new Table(computeColumnsNative(nativeHandles, table.getNativeView()));
+  }
+
   @Override
   public synchronized void close() {
     cleaner.delRef();
@@ -95,5 +122,6 @@ public class CompiledExpression implements AutoCloseable {
 
   private static native long compile(byte[] serializedExpression);
   private static native long computeColumn(long astHandle, long tableHandle);
+  private static native long[] computeColumnsNative(long[] astHandles, long tableHandle);
   private static native void destroy(long handle);
 }

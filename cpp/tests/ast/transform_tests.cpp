@@ -7,6 +7,7 @@
 #include <cudf_test/column_utilities.hpp>
 #include <cudf_test/column_wrapper.hpp>
 #include <cudf_test/iterator_utilities.hpp>
+#include <cudf_test/table_utilities.hpp>
 #include <cudf_test/testing_main.hpp>
 #include <cudf_test/type_lists.hpp>
 
@@ -1028,6 +1029,58 @@ TYPED_TEST(TransformTest, ComplexScalarOnly)
   auto expected = column_wrapper<bool>{true, true, true, true, true};
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->view());
+}
+
+TEST_F(ComputeColumnTest, MultipleOutputJit)
+{
+  auto lhs   = column_wrapper<int32_t>{{1, 2, 3, 4}, {1, 0, 1, 1}};
+  auto rhs   = column_wrapper<int32_t>{{10, 20, 30, 40}, {1, 1, 0, 1}};
+  auto table = cudf::table_view{{lhs, rhs}};
+
+  auto lhs_ref = cudf::ast::column_reference(0);
+  auto rhs_ref = cudf::ast::column_reference(1);
+
+  auto threshold_value = cudf::numeric_scalar<int32_t>(25);
+  auto threshold       = cudf::ast::literal(threshold_value);
+  auto greater         = cudf::ast::operation(cudf::ast::ast_operator::GREATER, rhs_ref, threshold);
+
+  auto one_value = cudf::numeric_scalar<int32_t>(1);
+  auto one       = cudf::ast::literal(one_value);
+  auto add       = cudf::ast::operation(cudf::ast::ast_operator::ADD, lhs_ref, one);
+
+  std::reference_wrapper<cudf::ast::expression const> expressions[]{lhs_ref, greater, add};
+  auto result = cudf::compute_columns_jit(table, expressions);
+
+  auto expected_greater = column_wrapper<bool>{{false, false, true, true}, {1, 1, 0, 1}};
+  auto expected_add     = column_wrapper<int32_t>{{2, 3, 4, 5}, {1, 0, 1, 1}};
+  auto expected         = cudf::table_view{{lhs, expected_greater, expected_add}};
+  CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result->view());
+}
+
+TEST_F(ComputeColumnTest, MultipleOutput)
+{
+  auto lhs   = column_wrapper<int32_t>{{1, 2, 3, 4}, {1, 0, 1, 1}};
+  auto rhs   = column_wrapper<int32_t>{{10, 20, 30, 40}, {1, 1, 0, 1}};
+  auto table = cudf::table_view{{lhs, rhs}};
+
+  auto lhs_ref = cudf::ast::column_reference(0);
+  auto rhs_ref = cudf::ast::column_reference(1);
+
+  auto threshold_value = cudf::numeric_scalar<int32_t>(25);
+  auto threshold       = cudf::ast::literal(threshold_value);
+  auto greater         = cudf::ast::operation(cudf::ast::ast_operator::GREATER, rhs_ref, threshold);
+
+  auto one_value = cudf::numeric_scalar<int32_t>(1);
+  auto one       = cudf::ast::literal(one_value);
+  auto add       = cudf::ast::operation(cudf::ast::ast_operator::ADD, lhs_ref, one);
+
+  std::reference_wrapper<cudf::ast::expression const> expressions[]{lhs_ref, greater, add};
+  auto result = cudf::compute_columns(table, expressions);
+
+  auto expected_greater = column_wrapper<bool>{{false, false, true, true}, {1, 1, 0, 1}};
+  auto expected_add     = column_wrapper<int32_t>{{2, 3, 4, 5}, {1, 0, 1, 1}};
+  auto expected         = cudf::table_view{{lhs, expected_greater, expected_add}};
+  CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result->view());
 }
 
 template <typename T>

@@ -16,6 +16,7 @@
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/table/table_device_view.cuh>
+#include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/utilities/error.hpp>
@@ -24,6 +25,8 @@
 #include <rmm/resource_ref.hpp>
 
 #include <algorithm>
+#include <iterator>
+#include <vector>
 
 namespace cudf {
 namespace detail {
@@ -118,6 +121,27 @@ std::unique_ptr<column> compute_column(table_view const& table,
 {
   CUDF_FUNC_RANGE();
   return detail::compute_column(table, expr, stream, mr);
+}
+
+std::unique_ptr<table> compute_columns(
+  table_view const& table,
+  std::span<std::reference_wrapper<ast::expression const> const> expressions,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  CUDF_FUNC_RANGE();
+  CUDF_EXPECTS(!expressions.empty(), "At least one expression is required", std::invalid_argument);
+  if (get_context().use_jit()) { return compute_columns_jit(table, expressions, stream, mr); }
+
+  std::vector<std::unique_ptr<column>> columns;
+  columns.reserve(expressions.size());
+  std::transform(expressions.begin(),
+                 expressions.end(),
+                 std::back_inserter(columns),
+                 [&](auto const& expression) {
+                   return detail::compute_column(table, expression.get(), stream, mr);
+                 });
+  return std::make_unique<cudf::table>(std::move(columns));
 }
 
 }  // namespace cudf

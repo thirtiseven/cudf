@@ -8,6 +8,7 @@
 #include "cudf_test/column_wrapper.hpp"
 
 #include <cudf_test/debug_utilities.hpp>
+#include <cudf_test/table_utilities.hpp>
 #include <cudf_test/testing_main.hpp>
 
 #include <cudf/column/column_factories.hpp>
@@ -402,6 +403,114 @@ return cudf::errc::SUCCESS;
                                       transform_args.row_size);
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->get_column(0).view());
+}
+
+TEST_F(RowIRCudaCodeGenTest, AstConversionMultipleOutputs)
+{
+  cudf::ast::tree ast_tree;
+  auto forty_two = cudf::numeric_scalar(42);
+  auto& column_ref =
+    ast_tree.push(cudf::ast::column_reference{0, cudf::ast::table_reference::LEFT});
+  auto& forty_two_literal = ast_tree.push(cudf::ast::literal{forty_two});
+  auto& add_op            = ast_tree.push(
+    cudf::ast::operation{cudf::ast::ast_operator::ADD, column_ref, forty_two_literal});
+
+  auto column = cudf::test::fixed_width_column_wrapper<int32_t>({69, 70, 71}).release();
+  std::reference_wrapper<cudf::ast::expression const> expressions[]{column_ref, add_op};
+  auto transform_args =
+    row_ir::ast_converter::compute_columns(row_ir::target::CUDA,
+                                           expressions,
+                                           cudf::table_view{{*column}},
+                                           cudf::table_view{},
+                                           "expression",
+                                           cudf::get_default_stream(),
+                                           cudf::get_current_device_resource_ref());
+
+  ASSERT_EQ(transform_args.outputs.size(), 2);
+  EXPECT_EQ(transform_args.outputs[0].type, cudf::data_type{cudf::type_id::INT32});
+  EXPECT_EQ(transform_args.outputs[1].type, cudf::data_type{cudf::type_id::INT32});
+  ASSERT_EQ(transform_args.inputs.size(), 2);
+  EXPECT_NE(transform_args.udf.find("int32_t* out_0, int32_t* out_1"), std::string::npos);
+
+  auto result = cudf::multi_transform(transform_args.udf,
+                                      transform_args.source_type,
+                                      transform_args.is_null_aware,
+                                      transform_args.user_data,
+                                      transform_args.inputs,
+                                      transform_args.outputs,
+                                      std::move(transform_args.string_offsets),
+                                      transform_args.row_size);
+
+  auto expected_add = cudf::test::fixed_width_column_wrapper<int32_t>({111, 112, 113});
+  auto expected     = cudf::table_view{{*column, expected_add}};
+  CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result->view());
+}
+
+TEST_F(RowIRCudaCodeGenTest, AstConversionMultipleOutputsEliminatesCommonSubexpressions)
+{
+  cudf::ast::tree ast_tree;
+  auto& column_ref =
+    ast_tree.push(cudf::ast::column_reference{0, cudf::ast::table_reference::LEFT});
+  auto& first_add = ast_tree.push(
+    cudf::ast::operation{cudf::ast::ast_operator::ADD, column_ref, column_ref});
+  auto& second_add = ast_tree.push(
+    cudf::ast::operation{cudf::ast::ast_operator::ADD, column_ref, column_ref});
+
+  auto column = cudf::test::fixed_width_column_wrapper<int32_t>({1, 2, 3}).release();
+  std::reference_wrapper<cudf::ast::expression const> expressions[]{first_add, second_add};
+  auto transform_args =
+    row_ir::ast_converter::compute_columns(row_ir::target::CUDA,
+                                           expressions,
+                                           cudf::table_view{{*column}},
+                                           cudf::table_view{},
+                                           "expression",
+                                           cudf::get_default_stream(),
+                                           cudf::get_current_device_resource_ref());
+
+  auto const first = transform_args.udf.find("opcode::ADD");
+  ASSERT_NE(first, std::string::npos);
+  EXPECT_EQ(transform_args.udf.find("opcode::ADD", first + 1), std::string::npos);
+
+  auto result = cudf::multi_transform(transform_args.udf,
+                                      transform_args.source_type,
+                                      transform_args.is_null_aware,
+                                      transform_args.user_data,
+                                      transform_args.inputs,
+                                      transform_args.outputs,
+                                      std::move(transform_args.string_offsets),
+                                      transform_args.row_size);
+
+  auto expected_column = cudf::test::fixed_width_column_wrapper<int32_t>({2, 4, 6});
+  auto expected        = cudf::table_view{{expected_column, expected_column}};
+  CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result->view());
+}
+
+TEST_F(RowIRCudaCodeGenTest, AstConversionMultipleOutputsSharesNullDependencies)
+{
+  cudf::ast::tree ast_tree;
+  auto& column_ref =
+    ast_tree.push(cudf::ast::column_reference{0, cudf::ast::table_reference::LEFT});
+  auto one = cudf::numeric_scalar(1);
+  auto& one_literal = ast_tree.push(cudf::ast::literal{one});
+  auto& add_op      = ast_tree.push(
+    cudf::ast::operation{cudf::ast::ast_operator::ADD, column_ref, one_literal});
+
+  auto column =
+    cudf::test::fixed_width_column_wrapper<int32_t>({1, 2, 3}, {true, false, true}).release();
+  std::reference_wrapper<cudf::ast::expression const> expressions[]{column_ref, add_op};
+  auto transform_args =
+    row_ir::ast_converter::compute_columns(row_ir::target::CUDA,
+                                           expressions,
+                                           cudf::table_view{{*column}},
+                                           cudf::table_view{},
+                                           "expression",
+                                           cudf::get_default_stream(),
+                                           cudf::get_current_device_resource_ref());
+
+  EXPECT_EQ(transform_args.is_null_aware, cudf::null_aware::NO);
+  ASSERT_EQ(transform_args.outputs.size(), 2);
+  EXPECT_EQ(transform_args.outputs[0].nullability, cudf::output_nullability::PRESERVE);
+  EXPECT_EQ(transform_args.outputs[1].nullability, cudf::output_nullability::PRESERVE);
 }
 
 TEST_F(RowIRCudaCodeGenTest, FilterPredicate)

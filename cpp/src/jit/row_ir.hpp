@@ -27,6 +27,9 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -106,12 +109,17 @@ struct [[nodiscard]] transform_args {
  */
 struct [[nodiscard]] instance_context {
  private:
+  using common_expression =
+    std::pair<var_info, std::optional<int32_t>>;  ///< Variable and optional RESCALE input index
+
   int32_t num_tmp_vars_   = 0;                 ///< The number of temporary variables generated
   std::string tmp_prefix_ = "tmp_";            ///< The prefix for temporary variable identifiers
   bool has_nulls_         = false;             ///< If expressions involve null values
   std::vector<input> inputs_;                  ///< The inputs for the IR
   std::vector<var_info> input_vars_;           ///< The input variables for the IR
   std::vector<untyped_var_info> output_vars_;  ///< The output variables for the IR
+  std::unordered_map<std::string, common_expression> common_expressions_;
+  std::unordered_map<std::string, common_expression> current_expressions_;
   rmm::cuda_stream_view
     stream_;  ///< The CUDA stream for any device operations during IR generation
   rmm::device_async_resource_ref
@@ -156,6 +164,15 @@ struct [[nodiscard]] instance_context {
    * @return A unique temporary variable identifier
    */
   [[nodiscard]] std::string make_tmp_id();
+
+  [[nodiscard]] std::optional<common_expression> find_common_expression(
+    std::string_view key) const;
+
+  void add_current_expression(std::string key,
+                              var_info variable,
+                              std::optional<int32_t> scale_input_index);
+
+  void finish_expression();
 
   /**
    * @brief Returns true if expressions involve null values
@@ -202,9 +219,15 @@ struct [[nodiscard]] instance_context {
 struct [[nodiscard]] code_sink {
  private:
   std::string code_;
+  std::unordered_set<std::string> emitted_nodes_;
 
  public:
   void emit(std::string_view code) { code_ += code; }
+
+  [[nodiscard]] bool mark_emitted(std::string_view id)
+  {
+    return emitted_nodes_.emplace(id).second;
+  }
 
   [[nodiscard]] std::string const& get_code() const { return code_; }
 };
@@ -231,6 +254,10 @@ struct [[nodiscard]] node {
   data_type type_ = {};  ///< The resolved type information of the IR node
 
   std::string id_ = {};  ///< The identifier of the IR node
+
+  std::string common_subexpression_key_ = {};
+
+  [[nodiscard]] std::string make_common_subexpression_key() const;
 
   /**
    * @brief Create a set of argument IR nodes
@@ -378,6 +405,11 @@ struct [[nodiscard]] node {
   [[nodiscard]] bool is_always_valid() const;
 
   /**
+   * @brief Add the input indices referenced by this node to `indices`.
+   */
+  void collect_input_indices(std::unordered_set<int32_t>& indices) const;
+
+  /**
    * @brief Instantiate the IR node with the given context and instance information, setting up any
    * necessary state and preprocessing needed for code generation.
    * @param ctx The context within which the IR is instantiated
@@ -447,8 +479,34 @@ struct [[nodiscard]] ast_converter {
 
   [[nodiscard]] std::unique_ptr<row_ir::node> add_ir_node(ast::jit::detail::operation const& expr);
 
+  [[nodiscard]]
+  std::tuple<std::string, null_aware, fallible, std::vector<output_nullability>> generate_code(
+    target target,
+    std::span<std::reference_wrapper<ast::expression const> const> expressions,
+    std::string_view function_name);
+
   [[nodiscard]] std::tuple<std::string, null_aware, fallible, output_nullability> generate_code(
     target target, ast::expression const& expr, std::string_view function_name);
+
+  /**
+   * @brief Convert AST `compute_column` expressions to a single multi-output `cudf::transform`
+   * @param target The target for which the IR is generated
+   * @param expressions The AST expression roots to convert
+   * @param left_table The left input table for the expressions
+   * @param right_table The right input table for the expressions
+   * @param function_name The name of the generated function
+   * @param stream CUDA stream used for device memory operations and kernel launches.
+   * @param mr Device memory resource used to allocate the returned table's device memory
+   * @return The result of the conversion, containing the transform arguments and scalar columns
+   */
+  static transform_args compute_columns(
+    target target,
+    std::span<std::reference_wrapper<ast::expression const> const> expressions,
+    table_view const& left_table,
+    table_view const& right_table,
+    std::string_view function_name,
+    rmm::cuda_stream_view stream,
+    rmm::device_async_resource_ref mr);
 
   /**
    * @brief Convert an AST `compute_column` expression to a `cudf::transform`

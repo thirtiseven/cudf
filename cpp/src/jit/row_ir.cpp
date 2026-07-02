@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <format>
 #include <iostream>
+#include <iterator>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -437,6 +438,18 @@ int32_t instance_context::add_output()
 
 int32_t instance_context::add_input(input in)
 {
+  if (auto const* column = std::get_if<column_input>(&in);
+      column != nullptr && column->table_source.has_value() && column->column_index.has_value()) {
+    auto const existing = std::find_if(inputs_.cbegin(), inputs_.cend(), [&](auto const& value) {
+      auto const* existing_column = std::get_if<column_input>(&value);
+      return existing_column != nullptr && existing_column->table_source == column->table_source &&
+             existing_column->column_index == column->column_index;
+    });
+    if (existing != inputs_.cend()) {
+      return static_cast<int32_t>(std::distance(inputs_.cbegin(), existing));
+    }
+  }
+
   auto id     = static_cast<int32_t>(inputs_.size());
   auto id_str = std::format("in_{}", id);
 
@@ -456,6 +469,28 @@ int32_t instance_context::add_input(input in)
 std::string instance_context::make_tmp_id()
 {
   return std::format("{}{}", tmp_prefix_, num_tmp_vars_++);
+}
+
+std::optional<instance_context::common_expression> instance_context::find_common_expression(
+  std::string_view key) const
+{
+  auto const found = common_expressions_.find(std::string{key});
+  return found == common_expressions_.cend() ? std::nullopt
+                                             : std::optional<common_expression>{found->second};
+}
+
+void instance_context::add_current_expression(std::string key,
+                                              var_info variable,
+                                              std::optional<int32_t> scale_input_index)
+{
+  current_expressions_.try_emplace(
+    std::move(key), std::move(variable), std::move(scale_input_index));
+}
+
+void instance_context::finish_expression()
+{
+  common_expressions_.merge(current_expressions_);
+  current_expressions_.clear();
 }
 
 bool instance_context::has_nulls() const { return has_nulls_; }
@@ -572,6 +607,35 @@ bool node::is_always_valid() const
   return std::all_of(args_.begin(), args_.end(), [](auto& a) { return a->is_always_valid(); });
 }
 
+void node::collect_input_indices(std::unordered_set<int32_t>& indices) const
+{
+  if (op_ == opcode::GET_INPUT) {
+    indices.insert(std::get<input_reference>(reference_).index);
+    return;
+  }
+  for (auto const& arg : args_) {
+    arg->collect_input_indices(indices);
+  }
+}
+
+std::string node::make_common_subexpression_key() const
+{
+  if (op_ == opcode::GET_INPUT) {
+    return std::format("{}:{}", static_cast<int32_t>(op_),
+                       std::get<input_reference>(reference_).index);
+  }
+
+  auto key = std::format("{}:{}:{}:{}",
+                         static_cast<int32_t>(op_),
+                         static_cast<int32_t>(error_policy_),
+                         target_scale_.has_value(),
+                         target_scale_.value_or(0));
+  for (auto const& arg : args_) {
+    key += std::format(":{}", arg->common_subexpression_key_);
+  }
+  return key;
+}
+
 std::string to_cuda_type(cudf::data_type type, bool nullable)
 {
   auto name = type_to_name(type);
@@ -583,8 +647,6 @@ void node::instantiate(instance_context& ctx)
   for (auto& arg : args_) {
     arg->instantiate(ctx);
   }
-
-  id_ = ctx.make_tmp_id();
 
   switch (op_) {
     case opcode::GET_INPUT: {
@@ -599,15 +661,36 @@ void node::instantiate(instance_context& ctx)
         arg_types.emplace_back(arg->get_type());
       }
 
-      if (op_ == opcode::RESCALE) {
-        scale_reference_ = input_reference{ctx.add_input(cudf::numeric_scalar<int32_t>{
-          target_scale_.value_or(0), ctx.get_stream(), ctx.get_mr()})};
-        arg_types.emplace_back(cudf::type_id::INT32);
-      }
+      if (op_ == opcode::RESCALE) { arg_types.emplace_back(cudf::type_id::INT32); }
 
       type_ = get_return_type(op_, arg_types, target_scale_);
     } break;
   }
+
+  if (op_ == opcode::SET_OUTPUT) {
+    id_ = ctx.make_tmp_id();
+    return;
+  }
+
+  common_subexpression_key_ = make_common_subexpression_key();
+  if (auto const common = ctx.find_common_expression(common_subexpression_key_);
+      common.has_value()) {
+    id_   = common->first.id;
+    type_ = common->first.type;
+    if (common->second.has_value()) {
+      scale_reference_ = input_reference{common->second.value()};
+    }
+    return;
+  }
+
+  id_ = ctx.make_tmp_id();
+  std::optional<int32_t> scale_input_index;
+  if (op_ == opcode::RESCALE) {
+    scale_reference_ = input_reference{ctx.add_input(cudf::numeric_scalar<int32_t>{
+      target_scale_.value_or(0), ctx.get_stream(), ctx.get_mr()})};
+    scale_input_index = scale_reference_.index;
+  }
+  ctx.add_current_expression(common_subexpression_key_, var_info{id_, type_}, scale_input_index);
 }
 
 void node::emit_code(instance_context& instance, target_info const& info, code_sink& sink) const
@@ -615,6 +698,8 @@ void node::emit_code(instance_context& instance, target_info const& info, code_s
   for (auto& arg : args_) {
     arg->emit_code(instance, info, sink);
   }
+
+  if (op_ != opcode::SET_OUTPUT && !sink.mark_emitted(id_)) { return; }
 
   switch (info.id) {
     case target::CUDA: {
@@ -741,38 +826,67 @@ bool is_nullable(scalar_input const& in) { return in.scalar_column->view().nulla
 
 bool is_nullable(column_input const& in) { return in.column.nullable(); }
 
-std::tuple<std::string, null_aware, fallible, output_nullability> ast_converter::generate_code(
-  target target_id, ast::expression const& expr, std::string_view function_name)
+std::tuple<std::string, null_aware, fallible, std::vector<output_nullability>>
+ast_converter::generate_code(
+  target target_id,
+  std::span<std::reference_wrapper<ast::expression const> const> expressions,
+  std::string_view function_name)
 {
-  // add 1 auto-deduced output variable
-  [[maybe_unused]] auto output_id = instance_.add_output();
+  CUDF_EXPECTS(!expressions.empty(), "At least one expression is required", std::invalid_argument);
 
-  output_irs_.emplace_back(std::make_unique<row_ir::node>(output_reference{0}, expr.accept(*this)));
+  for (auto const& expression : expressions) {
+    auto const output_id = instance_.add_output();
+    output_irs_.emplace_back(
+      std::make_unique<row_ir::node>(output_reference{output_id}, expression.get().accept(*this)));
+  }
 
-  bool has_nullable_inputs =
-    std::any_of(instance_.inputs_.begin(), instance_.inputs_.end(), [&](auto& in) {
-      return std::visit([](auto& c) { return is_nullable(c); }, in);
-    });
+  std::vector<std::unordered_set<int32_t>> nullable_dependencies;
+  nullable_dependencies.reserve(output_irs_.size());
+  for (auto const& ir : output_irs_) {
+    std::unordered_set<int32_t> input_indices;
+    ir->collect_input_indices(input_indices);
 
-  bool is_null_aware = std::any_of(
-    output_irs_.cbegin(), output_irs_.cend(), [](auto& ir) { return ir->is_null_aware(); });
+    auto& dependencies = nullable_dependencies.emplace_back();
+    for (auto const index : input_indices) {
+      if (std::visit([](auto& input) { return is_nullable(input); }, instance_.inputs_[index])) {
+        dependencies.insert(index);
+      }
+    }
+  }
+
+  // Non-null-aware stencils are safe only when every output depends on the same nullable inputs.
+  bool const has_different_null_dependencies =
+    std::adjacent_find(nullable_dependencies.cbegin(),
+                       nullable_dependencies.cend(),
+                       [](auto const& lhs, auto const& rhs) { return lhs != rhs; }) !=
+    nullable_dependencies.cend();
+  bool is_null_aware = has_different_null_dependencies ||
+                       std::any_of(output_irs_.cbegin(), output_irs_.cend(), [](auto& ir) {
+                         return ir->is_null_aware();
+                       });
 
   bool is_fallible = std::any_of(
     output_irs_.cbegin(), output_irs_.cend(), [](auto& ir) { return ir->is_fallible(); });
 
-  bool output_is_always_valid = std::all_of(
-    output_irs_.cbegin(), output_irs_.cend(), [](auto& ir) { return ir->is_always_valid(); });
-
-  bool may_evaluate_null = output_is_always_valid ? false : (has_nullable_inputs || is_null_aware);
-
-  auto null_policy =
-    may_evaluate_null ? output_nullability::PRESERVE : output_nullability::ALL_VALID;
+  std::vector<output_nullability> null_policies;
+  null_policies.reserve(output_irs_.size());
+  std::transform(output_irs_.cbegin(),
+                 output_irs_.cend(),
+                 nullable_dependencies.cbegin(),
+                 std::back_inserter(null_policies),
+                 [&](auto const& ir, auto const& dependencies) {
+                   bool const may_evaluate_null =
+                     !ir->is_always_valid() && (!dependencies.empty() || ir->is_null_aware());
+                   return may_evaluate_null ? output_nullability::PRESERVE
+                                            : output_nullability::ALL_VALID;
+                 });
 
   instance_.set_has_nulls(is_null_aware);
 
   // instantiate the IR nodes
   for (auto& ir : output_irs_) {
     ir->instantiate(instance_);
+    instance_.finish_expression();
   }
 
   target_info target{target_id};
@@ -826,7 +940,16 @@ std::tuple<std::string, null_aware, fallible, output_nullability> ast_converter:
   return {sink.get_code(),
           is_null_aware ? null_aware::YES : null_aware::NO,
           is_fallible ? fallible::YES : fallible::NO,
-          null_policy};
+          std::move(null_policies)};
+}
+
+std::tuple<std::string, null_aware, fallible, output_nullability> ast_converter::generate_code(
+  target target_id, ast::expression const& expr, std::string_view function_name)
+{
+  std::reference_wrapper<ast::expression const> expressions[]{expr};
+  auto [code, is_null_aware, is_fallible, null_policies] =
+    generate_code(target_id, expressions, function_name);
+  return {std::move(code), is_null_aware, is_fallible, null_policies.front()};
 }
 
 std::variant<column_view, scalar_column_view> get_column_view(scalar_input const& in)
@@ -841,21 +964,19 @@ std::variant<column_view, scalar_column_view> get_column_view(column_input const
 
 // Due to the AST expression tree structure, we can't generate the IR without the target
 // tables
-transform_args ast_converter::compute_column(target target_id,
-                                             ast::expression const& expr,
-                                             table_view const& left_table,
-                                             table_view const& right_table,
-                                             std::string_view function_name,
-                                             rmm::cuda_stream_view stream,
-                                             rmm::device_async_resource_ref mr)
+transform_args ast_converter::compute_columns(
+  target target_id,
+  std::span<std::reference_wrapper<ast::expression const> const> expressions,
+  table_view const& left_table,
+  table_view const& right_table,
+  std::string_view function_name,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
 {
   ast_converter converter{stream, mr, left_table, right_table};
 
-  // TODO(lamarrr): consider deduplicating ast expression's input column references. See
-  // TransformTest/1.DeeplyNestedArithmeticLogicalExpression for reference
-
-  auto [code, is_null_aware, is_fallible, output_nullability] =
-    converter.generate_code(target_id, expr, function_name);
+  auto [code, is_null_aware, is_fallible, output_nullabilities] =
+    converter.generate_code(target_id, expressions, function_name);
   std::vector<std::variant<column_view, scalar_column_view>> inputs;
   std::vector<std::unique_ptr<column>> scalar_columns;
   std::vector<std::optional<int32_t>> table_sources;
@@ -880,9 +1001,13 @@ transform_args ast_converter::compute_column(target target_id,
     }
   }
 
-  auto& out               = converter.output_irs_[0];
-  auto output_column_type = out->get_type();
-  auto output   = transform_output{.type = output_column_type, .nullability = output_nullability};
+  std::vector<transform_output> outputs;
+  outputs.reserve(converter.output_irs_.size());
+  for (size_t i = 0; i < converter.output_irs_.size(); ++i) {
+    outputs.emplace_back(transform_output{.type        = converter.output_irs_[i]->get_type(),
+                                          .nullability = output_nullabilities[i]});
+  }
+
   auto row_size = std::max({left_table.num_rows(), right_table.num_rows()});
   auto result   = transform_args{.scalar_columns       = std::move(scalar_columns),
                                  .input_table_sources  = std::move(table_sources),
@@ -892,8 +1017,8 @@ transform_args ast_converter::compute_column(target target_id,
                                  .is_null_aware        = is_null_aware,
                                  .is_fallible          = is_fallible,
                                  .user_data            = std::nullopt,
-                                 .inputs               = inputs,
-                                 .outputs{output},
+                                 .inputs               = std::move(inputs),
+                                 .outputs              = std::move(outputs),
                                  .string_offsets{},
                                  .row_size = row_size};
   if (get_context().dump_codegen()) {
@@ -901,6 +1026,19 @@ transform_args ast_converter::compute_column(target target_id,
   }
 
   return result;
+}
+
+transform_args ast_converter::compute_column(target target_id,
+                                             ast::expression const& expr,
+                                             table_view const& left_table,
+                                             table_view const& right_table,
+                                             std::string_view function_name,
+                                             rmm::cuda_stream_view stream,
+                                             rmm::device_async_resource_ref mr)
+{
+  std::reference_wrapper<ast::expression const> expressions[]{expr};
+  return compute_columns(
+    target_id, expressions, left_table, right_table, function_name, stream, mr);
 }
 
 transform_args ast_converter::filter(target target_id,

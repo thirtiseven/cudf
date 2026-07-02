@@ -20,6 +20,7 @@ namespace cudf::jni {
 JNI_EXP_TYPE CUDA_EXCEPTION_CLASS          = "ai/rapids/cudf/CudaException";
 JNI_EXP_TYPE CUDA_FATAL_EXCEPTION_CLASS    = "ai/rapids/cudf/CudaFatalException";
 JNI_EXP_TYPE CUDF_EXCEPTION_CLASS          = "ai/rapids/cudf/CudfException";
+JNI_EXP_TYPE CUDF_EVALUATION_EXCEPTION_CLASS = "ai/rapids/cudf/CudfEvaluationException";
 JNI_EXP_TYPE CUDF_OVERFLOW_EXCEPTION_CLASS = "ai/rapids/cudf/CudfColumnSizeOverflowException";
 JNI_EXP_TYPE NVCOMP_EXCEPTION_CLASS        = "ai/rapids/cudf/nvcomp/NvcompException";
 JNI_EXP_TYPE NVCOMP_CUDA_EXCEPTION_CLASS   = "ai/rapids/cudf/nvcomp/NvcompCudaException";
@@ -165,6 +166,8 @@ inline void jni_cuda_check(JNIEnv* const env, cudaError_t cuda_status)
     return ret_val;                                                                                 \
   }
 
+#define JNI_CHECK_THROW_CODE_EXCEPTION(...) JNI_CHECK_THROW_CUDA_EXCEPTION(__VA_ARGS__)
+
 #define JNI_NULL_CHECK(env, obj, error_msg, ret_val)                                            \
   {                                                                                             \
     if ((obj) == 0) { JNI_THROW_NEW(env, cudf::jni::NPE_EXCEPTION_CLASS, error_msg, ret_val); } \
@@ -195,6 +198,15 @@ inline void jni_cuda_check(JNIEnv* const env, cudaError_t cuda_status)
   {                                                                                              \
     JNI_CHECK_THROW_CUDA_EXCEPTION(                                                              \
       env, cudf::jni::CUDA_EXCEPTION_CLASS, e.what(), nullptr, e.error_code(), ret_val);         \
+  }                                                                                              \
+  catch (cudf::evaluation_error const& e)                                                        \
+  {                                                                                              \
+    JNI_CHECK_THROW_CODE_EXCEPTION(env,                                                          \
+                                   cudf::jni::CUDF_EVALUATION_EXCEPTION_CLASS,                  \
+                                   e.what(),                                                     \
+                                   nullptr,                                                      \
+                                   e.error_code(),                                               \
+                                   ret_val);                                                     \
   }                                                                                              \
   catch (cudf::data_type_error const& e)                                                         \
   {                                                                                              \
@@ -256,6 +268,15 @@ inline void jni_cuda_check(JNIEnv* const env, cudaError_t cuda_status)
   {                                                                                              \
     JNI_CHECK_THROW_CUDA_EXCEPTION(                                                              \
       env, cudf::jni::CUDA_EXCEPTION_CLASS, e.what(), nullptr, e.error_code(), ret_val);         \
+  }                                                                                              \
+  catch (cudf::evaluation_error const& e)                                                        \
+  {                                                                                              \
+    JNI_CHECK_THROW_CODE_EXCEPTION(env,                                                          \
+                                   cudf::jni::CUDF_EVALUATION_EXCEPTION_CLASS,                  \
+                                   e.what(),                                                     \
+                                   nullptr,                                                      \
+                                   e.error_code(),                                               \
+                                   ret_val);                                                     \
   }                                                                                              \
   catch (const cudf::data_type_error& e)                                                         \
   {                                                                                              \

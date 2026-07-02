@@ -13,6 +13,7 @@
 #include <cudf/transform.hpp>
 #include <cudf/types.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -709,6 +710,38 @@ JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_ast_CompiledExpression_computeColumn
     return reinterpret_cast<jlong>(result.release());
   }
   JNI_CATCH(env, 0);
+}
+
+JNIEXPORT jlongArray JNICALL Java_ai_rapids_cudf_ast_CompiledExpression_computeColumnsNative(
+  JNIEnv* env, jclass, jlongArray j_asts, jlong j_table)
+{
+  JNI_NULL_CHECK(env, j_asts, "Compiled AST pointer array is null", nullptr);
+  JNI_NULL_CHECK(env, j_table, "Table view pointer is null", nullptr);
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    cudf::jni::native_jlongArray ast_handles(env, j_asts);
+    if (ast_handles.size() == 0) { throw std::invalid_argument("At least one AST is required"); }
+
+    std::vector<std::reference_wrapper<cudf::ast::expression const>> expressions;
+    expressions.reserve(ast_handles.size());
+    for (auto const handle : ast_handles) {
+      if (handle == 0) { throw std::invalid_argument("Compiled AST pointer is null"); }
+      auto const* compiled_expr_ptr =
+        reinterpret_cast<cudf::jni::ast::compiled_expr const*>(handle);
+      expressions.emplace_back(compiled_expr_ptr->get_top_expression());
+    }
+
+    auto const* tview_ptr = reinterpret_cast<cudf::table_view const*>(j_table);
+    auto result           = cudf::compute_columns(*tview_ptr, expressions);
+    auto columns          = result->release();
+    cudf::jni::native_jlongArray column_handles(env, columns.size());
+    std::transform(columns.begin(), columns.end(), column_handles.begin(), [](auto& column) {
+      return cudf::jni::release_as_jlong(column);
+    });
+    return column_handles.get_jArray();
+  }
+  JNI_CATCH(env, nullptr);
 }
 
 JNIEXPORT void JNICALL Java_ai_rapids_cudf_ast_CompiledExpression_destroy(JNIEnv* env,

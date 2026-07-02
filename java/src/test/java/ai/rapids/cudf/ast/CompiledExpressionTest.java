@@ -48,6 +48,28 @@ public class CompiledExpressionTest extends CudfTestBase {
   }
 
   @Test
+  public void testMultipleOutputTransform() {
+    AstExpression first = new ColumnReference(0);
+    AstExpression second = new BinaryOperation(BinaryOperator.GREATER,
+        new ColumnReference(1), Literal.ofInt(25));
+    try (Table input = new Table.TestBuilder()
+             .column(1, null, 3, 4)
+             .column(10, 20, null, 40)
+             .build();
+         CompiledExpression firstCompiled = first.compile();
+         CompiledExpression secondCompiled = second.compile();
+         Table actual = CompiledExpression.computeColumns(
+             input, new CompiledExpression[] {firstCompiled, secondCompiled});
+         ColumnVector expectedFirst = ColumnVector.fromBoxedInts(1, null, 3, 4);
+         ColumnVector expectedSecond =
+             ColumnVector.fromBoxedBooleans(false, false, null, true)) {
+      Assertions.assertEquals(2, actual.getNumberOfColumns());
+      assertColumnsAreEqual(expectedFirst, actual.getColumn(0));
+      assertColumnsAreEqual(expectedSecond, actual.getColumn(1));
+    }
+  }
+
+  @Test
   public void testInvalidColumnReferenceTransform() {
     // Verify that computeColumn throws when passed an expression operating on TableReference.RIGHT.
     ColumnReference expr = new ColumnReference(1, TableReference.RIGHT);
