@@ -496,6 +496,10 @@ rtcx_embed(
 
 rtcx_add_embed(cudf_fragments)
 
+add_fragment(
+  cudf_fragments FRAGMENT row_ir_arithmetic_ops SOURCE src/jit/row_ir_arithmetic_ops.cu
+)
+
 list(APPEND CUDF_PRECOMPILE_PHYSICAL_TYPES uint8_t uint16_t uint32_t uint64_t numeric::decimal32
      numeric::decimal64 numeric::decimal128
 )
@@ -530,6 +534,77 @@ foreach(TYPE IN ITEMS ${CUDF_PRECOMPILE_PHYSICAL_TYPES})
     ${FILE_INDEX}
     "${INSTANCE}"
   )
+endforeach()
+
+# Keep the Project AST JIT POC fragment matrix narrow. These variants cover the shared-prefix
+# benchmark shapes without multiplying every possible input/output arity.
+function(make_ast_jit_accessors OUT_VAR COUNT COLUMN_TYPE ELEMENT_TYPE)
+  math(EXPR LAST_INDEX "${COUNT} - 1")
+  set(ACCESSORS)
+  foreach(INDEX RANGE ${LAST_INDEX})
+    list(
+      APPEND
+      ACCESSORS
+      "cudf::jit::column_accessor<${INDEX}ULL, ${COLUMN_TYPE}, ${ELEMENT_TYPE}, false, 0>"
+    )
+  endforeach()
+  list(JOIN ACCESSORS ", " JOINED_ACCESSORS)
+  set(${OUT_VAR} "cudf::jit::type_list<${JOINED_ACCESSORS}>" PARENT_SCOPE)
+endfunction()
+
+function(make_ast_jit_udf_type OUT_VAR TYPE INPUT_COUNT OUTPUT_COUNT)
+  set(PARAMS)
+  foreach(_ RANGE 1 ${OUTPUT_COUNT})
+    list(APPEND PARAMS "${TYPE} *")
+  endforeach()
+  foreach(_ RANGE 1 ${INPUT_COUNT})
+    list(APPEND PARAMS "${TYPE}")
+  endforeach()
+  list(JOIN PARAMS ", " JOINED_PARAMS)
+  set(${OUT_VAR} "int(${JOINED_PARAMS})" PARENT_SCOPE)
+endfunction()
+
+foreach(TYPE IN ITEMS uint32_t uint64_t)
+  foreach(OUTPUT_COUNT IN ITEMS 2 8)
+    set(INPUT_COUNT 3)
+    make_ast_jit_accessors(
+      INPUT_ACCESSORS ${INPUT_COUNT} cudf::column_device_view_core ${TYPE}
+    )
+    make_ast_jit_accessors(
+      OUTPUT_ACCESSORS ${OUTPUT_COUNT} cudf::mutable_column_device_view_core ${TYPE}
+    )
+    make_ast_jit_udf_type(UDF_TYPE ${TYPE} ${INPUT_COUNT} ${OUTPUT_COUNT})
+
+    set(FRAGMENT_NAME transform_kernel)
+    get_property(
+      FILE_INDEX
+      TARGET cudf_fragments__embed_props
+      PROPERTY EMBED_FILE_INDEX
+    )
+    set(VARIANT_NAME transform_kernel_${FILE_INDEX})
+    set(INSTANCE
+        "cudf::jit::transform_kernel<false, false, ${INPUT_ACCESSORS}, ${OUTPUT_ACCESSORS}>"
+    )
+    add_fragment(
+      cudf_fragments
+      FRAGMENT
+      ${VARIANT_NAME}
+      SOURCE
+      src/transform/jit/kernel.cu
+      KERNEL_INSTANCE
+      ${INSTANCE}
+      UDF_TYPE
+      "${UDF_TYPE}"
+      DEFINITIONS
+      CUDF_LTO_MODE
+      ARRAY_IDS
+      ${FRAGMENT_NAME}_FILE_INDEX
+      ${FRAGMENT_NAME}_INSTANCE
+      ARRAY_VALUES
+      ${FILE_INDEX}
+      "${INSTANCE}"
+    )
+  endforeach()
 endforeach()
 
 foreach(TYPE IN ITEMS ${CUDF_PRECOMPILE_PHYSICAL_TYPES})

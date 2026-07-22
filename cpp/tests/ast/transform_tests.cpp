@@ -7,6 +7,7 @@
 #include <cudf_test/column_utilities.hpp>
 #include <cudf_test/column_wrapper.hpp>
 #include <cudf_test/iterator_utilities.hpp>
+#include <cudf_test/table_utilities.hpp>
 #include <cudf_test/testing_main.hpp>
 #include <cudf_test/type_lists.hpp>
 
@@ -66,6 +67,41 @@ struct executor_jit {
 using Executors = cudf::test::Types<executor_ast, executor_jit>;
 
 TYPED_TEST_SUITE(TransformTest, Executors);
+
+struct ComputeColumnsJitTest : public cudf::test::BaseFixture {};
+
+TEST_F(ComputeColumnsJitTest, MultipleOutputs)
+{
+  auto lhs   = column_wrapper<int32_t>{{1, 2, 3, 4}, {1, 0, 1, 1}};
+  auto rhs   = column_wrapper<int32_t>{{10, 20, 30, 40}};
+  auto table = cudf::table_view{{lhs, rhs}};
+
+  auto lhs_ref = cudf::ast::column_reference(0);
+  auto rhs_ref = cudf::ast::column_reference(1);
+
+  auto threshold_value = cudf::numeric_scalar<int32_t>(25);
+  auto threshold       = cudf::ast::literal(threshold_value);
+  auto greater         = cudf::ast::operation(cudf::ast::ast_operator::GREATER, rhs_ref, threshold);
+
+  auto add = cudf::ast::operation(cudf::ast::ast_operator::ADD, lhs_ref, rhs_ref);
+
+  std::reference_wrapper<cudf::ast::expression const> expressions[]{lhs_ref, greater, add};
+  auto result = cudf::compute_columns_jit(table, expressions);
+
+  auto expected_greater = column_wrapper<bool>{false, false, true, true};
+  auto expected_add     = column_wrapper<int32_t>{{11, 22, 33, 44}, {1, 0, 1, 1}};
+  auto expected         = cudf::table_view{{lhs, expected_greater, expected_add}};
+  CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result->view());
+}
+
+TEST_F(ComputeColumnsJitTest, RejectsEmptyExpressions)
+{
+  auto input = column_wrapper<int32_t>{1, 2, 3};
+  auto table = cudf::table_view{{input}};
+  std::vector<std::reference_wrapper<cudf::ast::expression const>> expressions;
+
+  EXPECT_THROW(cudf::compute_columns_jit(table, expressions), std::invalid_argument);
+}
 
 TYPED_TEST(TransformTest, ColumnReference)
 {
