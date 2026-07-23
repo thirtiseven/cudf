@@ -389,7 +389,7 @@ ConfigureNVBench(CSV_WRITER_NVBENCH io/csv/csv_writer.cpp)
 
 # ##################################################################################################
 # * ast benchmark ---------------------------------------------------------------------------------
-ConfigureNVBench(AST_NVBENCH ast/polynomials.cpp ast/transform.cpp)
+ConfigureNVBench(AST_NVBENCH ast/jit.cpp ast/polynomials.cpp ast/transform.cpp)
 
 # ##################################################################################################
 # * LTO Fragments ----------------------------------------------------------------------------

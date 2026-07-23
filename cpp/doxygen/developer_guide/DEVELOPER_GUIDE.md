@@ -7,6 +7,7 @@ to these additional files for further documentation of libcudf best practices.
 * [Testing Guide](TESTING.md) for guidelines on writing unit tests.
 * [Benchmarking Guide](BENCHMARKING.md) for guidelines on writing unit benchmarks.
 * [Profiling Guide](PROFILING.md) for guidelines on profiling libcudf code.
+* [AST JIT LTO Design](AST_JIT_LTO.md) for the precompiled operator fragment design.
 
 # Overview
 

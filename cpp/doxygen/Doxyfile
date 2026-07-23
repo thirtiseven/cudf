@@ -860,6 +860,7 @@ WARN_LOGFILE           =
 INPUT                  = main_page.md \
                          regex.md \
                          unicode.md \
+                         developer_guide/AST_JIT_LTO.md \
                          developer_guide/BENCHMARKING.md \
                          developer_guide/DOCUMENTATION.md \
                          developer_guide/DEVELOPER_GUIDE.md \

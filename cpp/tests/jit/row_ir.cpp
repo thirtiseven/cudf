@@ -8,7 +8,6 @@
 #include "cudf_test/column_wrapper.hpp"
 
 #include <cudf_test/debug_utilities.hpp>
-#include <cudf_test/table_utilities.hpp>
 #include <cudf_test/testing_main.hpp>
 
 #include <cudf/column/column_factories.hpp>
@@ -187,7 +186,8 @@ TEST_F(RowIRCudaCodeGenTest, BinaryOperation)
 
     auto expected_code =
       R"***(int32_t tmp_0 = in_0;
-int32_t tmp_1 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::ADD, cudf::error_policy::PROPAGATE>(tmp_0, tmp_0);
+int32_t tmp_1 = in_0;
+int32_t tmp_2 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::ADD, cudf::error_policy::PROPAGATE>(tmp_0, tmp_1);
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_code);
@@ -209,7 +209,8 @@ int32_t tmp_1 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::ADD
 
     auto expected_null_code =
       R"***(numeric::decimal32 tmp_0 = in_1;
-numeric::decimal32 tmp_1 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::ADD, cudf::error_policy::PROPAGATE>(tmp_0, tmp_0);
+numeric::decimal32 tmp_1 = in_1;
+numeric::decimal32 tmp_2 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::ADD, cudf::error_policy::PROPAGATE>(tmp_0, tmp_1);
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_null_code);
@@ -236,11 +237,12 @@ TEST_F(RowIRCudaCodeGenTest, BinaryOperationOverflow)
 
     auto expected_code =
       R"***(int32_t tmp_0 = in_0;
-auto expected__tmp_1 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::ADD_OVERFLOW, cudf::error_policy::PROPAGATE>(tmp_0, tmp_0);
-if(!expected__tmp_1.has_value()) {
- return expected__tmp_1.error();
+int32_t tmp_1 = in_0;
+auto expected__tmp_2 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::ADD_OVERFLOW, cudf::error_policy::PROPAGATE>(tmp_0, tmp_1);
+if(!expected__tmp_2.has_value()) {
+ return expected__tmp_2.error();
 }
-int32_t tmp_1 = expected__tmp_1.value();
+int32_t tmp_2 = expected__tmp_2.value();
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_code);
@@ -263,7 +265,8 @@ int32_t tmp_1 = expected__tmp_1.value();
 
     auto expected_code =
       R"***(cuda::std::optional<int32_t> tmp_0 = in_0;
-cuda::std::optional<int32_t> tmp_1 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::ADD_OVERFLOW, cudf::error_policy::NULLIFY>(tmp_0, tmp_0);
+cuda::std::optional<int32_t> tmp_1 = in_0;
+cuda::std::optional<int32_t> tmp_2 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::ADD_OVERFLOW, cudf::error_policy::NULLIFY>(tmp_0, tmp_1);
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_code);
@@ -316,13 +319,15 @@ TEST_F(RowIRCudaCodeGenTest, VectorLengthOperation)
 
     auto expected_code =
       R"***(double tmp_0 = in_0;
-double tmp_1 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::MUL, cudf::error_policy::PROPAGATE>(tmp_0, tmp_0);
-double tmp_2 = in_1;
-double tmp_3 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::MUL, cudf::error_policy::PROPAGATE>(tmp_2, tmp_2);
-double tmp_4 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::ADD, cudf::error_policy::PROPAGATE>(tmp_1, tmp_3);
-double tmp_5 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::SQRT, cudf::error_policy::PROPAGATE>(tmp_4);
-double tmp_6 = tmp_5;
-*out_0 = tmp_6;
+double tmp_1 = in_0;
+double tmp_2 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::MUL, cudf::error_policy::PROPAGATE>(tmp_0, tmp_1);
+double tmp_3 = in_1;
+double tmp_4 = in_1;
+double tmp_5 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::MUL, cudf::error_policy::PROPAGATE>(tmp_3, tmp_4);
+double tmp_6 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::ADD, cudf::error_policy::PROPAGATE>(tmp_2, tmp_5);
+double tmp_7 = cudf::detail::row_ir::evaluate<cudf::detail::row_ir::opcode::SQRT, cudf::error_policy::PROPAGATE>(tmp_6);
+double tmp_8 = tmp_7;
+*out_0 = tmp_8;
 )***";
 
     EXPECT_EQ(sink.get_code(), expected_code);
@@ -362,6 +367,7 @@ TEST_F(RowIRCudaCodeGenTest, AstConversionBasic)
   EXPECT_EQ(transform_args.outputs[0].nullability, cudf::output_nullability::ALL_VALID);
   EXPECT_EQ(transform_args.outputs[0].type, cudf::data_type{cudf::type_id::INT32});
   ASSERT_EQ(transform_args.inputs.size(), 2);
+  ASSERT_TRUE(transform_args.lto_udf_source.has_value());
 
   /// The first input should be a scalar value of 42
   ASSERT_TRUE(std::holds_alternative<cudf::scalar_column_view>(transform_args.inputs[0]));
@@ -389,6 +395,19 @@ return cudf::errc::SUCCESS;
 
   EXPECT_EQ(transform_args.udf, expected_udf);
 
+  auto const expected_lto_udf =
+    R"***(extern "C" __device__ int transform(uint32_t* out_0, uint32_t in_0, uint32_t in_1)
+{
+uint32_t tmp_0 = in_0;
+uint32_t tmp_1 = in_1;
+uint32_t tmp_2 = cudf_row_ir_add_i32(tmp_0, tmp_1);
+uint32_t tmp_3 = tmp_2;
+*out_0 = tmp_3;
+return 0;
+})***";
+
+  EXPECT_EQ(*transform_args.lto_udf_source, expected_lto_udf);
+
   auto result = cudf::multi_transform(transform_args.udf,
                                       transform_args.source_type,
                                       transform_args.is_null_aware,
@@ -401,193 +420,72 @@ return cudf::errc::SUCCESS;
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, result->get_column(0).view());
 }
 
-TEST_F(RowIRCudaCodeGenTest, AstConversionMultipleOutputsEliminatesCommonSubexpressions)
+TEST_F(RowIRCudaCodeGenTest, AstConversionLtoSupportsNullableRepeatedInput)
 {
-  cudf::ast::tree ast_tree;
-  auto& first_column_ref =
-    ast_tree.push(cudf::ast::column_reference{0, cudf::ast::table_reference::LEFT});
-  auto& second_column_ref =
-    ast_tree.push(cudf::ast::column_reference{0, cudf::ast::table_reference::LEFT});
-  auto& first_add = ast_tree.push(
-    cudf::ast::operation{cudf::ast::ast_operator::ADD, first_column_ref, first_column_ref});
-  auto& second_add = ast_tree.push(
-    cudf::ast::operation{cudf::ast::ast_operator::ADD, second_column_ref, second_column_ref});
-  auto& multiply = ast_tree.push(
-    cudf::ast::operation{cudf::ast::ast_operator::MUL, second_add, second_column_ref});
+  auto column = cudf::test::fixed_width_column_wrapper<int64_t>{{-3, 4, -5}, {1, 0, 1}}.release();
+  auto column_ref = cudf::ast::column_reference{0, cudf::ast::table_reference::LEFT};
+  auto multiply   = cudf::ast::operation{cudf::ast::ast_operator::MUL, column_ref, column_ref};
 
-  auto column = cudf::test::fixed_width_column_wrapper<int32_t>({1, 2, 3}).release();
-  std::reference_wrapper<cudf::ast::expression const> expressions[]{first_add, multiply};
   auto transform_args =
-    row_ir::ast_converter::compute_columns(row_ir::target::CUDA,
-                                           expressions,
-                                           cudf::table_view{{*column}},
-                                           cudf::table_view{},
-                                           "expression",
-                                           cudf::get_default_stream(),
-                                           cudf::get_current_device_resource_ref());
+    row_ir::ast_converter::compute_column(row_ir::target::CUDA,
+                                          multiply,
+                                          cudf::table_view{{*column}},
+                                          cudf::table_view{},
+                                          "expression",
+                                          cudf::get_default_stream(),
+                                          cudf::get_current_device_resource_ref());
 
+  EXPECT_EQ(transform_args.is_null_aware, cudf::null_aware::NO);
   ASSERT_EQ(transform_args.inputs.size(), 1);
-  ASSERT_EQ(transform_args.outputs.size(), 2);
-  EXPECT_FALSE(transform_args.may_propagate_error);
-  auto const add = transform_args.udf.find("opcode::ADD");
-  ASSERT_NE(add, std::string::npos);
-  EXPECT_EQ(transform_args.udf.find("opcode::ADD", add + 1), std::string::npos);
+  ASSERT_EQ(transform_args.outputs.size(), 1);
+  EXPECT_EQ(transform_args.outputs.front().nullability, cudf::output_nullability::PRESERVE);
+  ASSERT_TRUE(transform_args.lto_udf_source.has_value());
 
-  auto result = cudf::multi_transform(transform_args.udf,
-                                      transform_args.source_type,
-                                      transform_args.is_null_aware,
-                                      transform_args.user_data,
-                                      transform_args.inputs,
-                                      transform_args.outputs,
-                                      std::move(transform_args.string_offsets),
-                                      transform_args.row_size);
-
-  auto expected_add      = cudf::test::fixed_width_column_wrapper<int32_t>({2, 4, 6});
-  auto expected_multiply = cudf::test::fixed_width_column_wrapper<int32_t>({2, 8, 18});
-  auto expected          = cudf::table_view{{expected_add, expected_multiply}};
-  CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result->view());
+  auto const expected_lto_udf =
+    R"***(extern "C" __device__ int transform(uint64_t* out_0, uint64_t in_0)
+{
+uint64_t tmp_0 = in_0;
+uint64_t tmp_1 = in_0;
+uint64_t tmp_2 = cudf_row_ir_mul_i64(tmp_0, tmp_1);
+uint64_t tmp_3 = tmp_2;
+*out_0 = tmp_3;
+return 0;
+})***";
+  EXPECT_EQ(*transform_args.lto_udf_source, expected_lto_udf);
 }
 
-TEST_F(RowIRCudaCodeGenTest, AstConversionMultipleOutputsKeepsLiteralsDistinct)
+TEST_F(RowIRCudaCodeGenTest, AstConversionLtoFallsBackForUnsupportedOperations)
 {
-  cudf::ast::tree ast_tree;
-  auto& first_column_ref =
-    ast_tree.push(cudf::ast::column_reference{0, cudf::ast::table_reference::LEFT});
-  auto& second_column_ref =
-    ast_tree.push(cudf::ast::column_reference{0, cudf::ast::table_reference::LEFT});
-  auto one = cudf::numeric_scalar<int32_t>(1);
-  auto two = cudf::numeric_scalar<int32_t>(2);
-  auto& one_literal = ast_tree.push(cudf::ast::literal{one});
-  auto& two_literal = ast_tree.push(cudf::ast::literal{two});
-  auto& add_one      = ast_tree.push(
-    cudf::ast::operation{cudf::ast::ast_operator::ADD, first_column_ref, one_literal});
-  auto& add_two = ast_tree.push(
-    cudf::ast::operation{cudf::ast::ast_operator::ADD, second_column_ref, two_literal});
+  auto lhs     = cudf::test::fixed_width_column_wrapper<int32_t>{1, 2, 3}.release();
+  auto rhs     = cudf::test::fixed_width_column_wrapper<int32_t>{4, 5, 6}.release();
+  auto table   = cudf::table_view{{*lhs, *rhs}};
+  auto lhs_ref = cudf::ast::column_reference{0};
+  auto rhs_ref = cudf::ast::column_reference{1};
 
-  auto column = cudf::test::fixed_width_column_wrapper<int32_t>({1, 2, 3}).release();
-  std::reference_wrapper<cudf::ast::expression const> expressions[]{add_one, add_two};
-  auto transform_args =
-    row_ir::ast_converter::compute_columns(row_ir::target::CUDA,
-                                           expressions,
-                                           cudf::table_view{{*column}},
-                                           cudf::table_view{},
-                                           "expression",
-                                           cudf::get_default_stream(),
-                                           cudf::get_current_device_resource_ref());
+  auto subtract = cudf::ast::operation{cudf::ast::ast_operator::SUB, lhs_ref, lhs_ref};
+  auto subtract_args =
+    row_ir::ast_converter::compute_column(row_ir::target::CUDA,
+                                          subtract,
+                                          table,
+                                          cudf::table_view{},
+                                          "expression",
+                                          cudf::get_default_stream(),
+                                          cudf::get_current_device_resource_ref());
+  EXPECT_FALSE(subtract_args.lto_udf_source.has_value());
+  EXPECT_EQ(subtract_args.inputs.size(), 1);
 
-  ASSERT_EQ(transform_args.inputs.size(), 3);
-  auto const first_add = transform_args.udf.find("opcode::ADD");
-  ASSERT_NE(first_add, std::string::npos);
-  EXPECT_NE(transform_args.udf.find("opcode::ADD", first_add + 1), std::string::npos);
-}
-
-TEST_F(RowIRCudaCodeGenTest, AstConversionMultipleOutputsSharesLiteralIdentity)
-{
-  cudf::ast::tree ast_tree;
-  auto& first_column_ref =
-    ast_tree.push(cudf::ast::column_reference{0, cudf::ast::table_reference::LEFT});
-  auto& second_column_ref =
-    ast_tree.push(cudf::ast::column_reference{0, cudf::ast::table_reference::LEFT});
-  auto literal_value = cudf::numeric_scalar<int32_t>(7);
-  auto& first_literal  = ast_tree.push(cudf::ast::literal{literal_value});
-  auto& second_literal = ast_tree.push(cudf::ast::literal{literal_value});
-  auto& first_add      = ast_tree.push(
-    cudf::ast::operation{cudf::ast::ast_operator::ADD, first_column_ref, first_literal});
-  auto& second_add = ast_tree.push(
-    cudf::ast::operation{cudf::ast::ast_operator::ADD, second_column_ref, second_literal});
-
-  auto column = cudf::test::fixed_width_column_wrapper<int32_t>({1, 2, 3}).release();
-  std::reference_wrapper<cudf::ast::expression const> expressions[]{first_add, second_add};
-  auto transform_args =
-    row_ir::ast_converter::compute_columns(row_ir::target::CUDA,
-                                           expressions,
-                                           cudf::table_view{{*column}},
-                                           cudf::table_view{},
-                                           "expression",
-                                           cudf::get_default_stream(),
-                                           cudf::get_current_device_resource_ref());
-
-  ASSERT_EQ(transform_args.inputs.size(), 2);
-  auto const add = transform_args.udf.find("opcode::ADD");
-  ASSERT_NE(add, std::string::npos);
-  EXPECT_EQ(transform_args.udf.find("opcode::ADD", add + 1), std::string::npos);
-}
-
-TEST_F(RowIRCudaCodeGenTest, AstConversionGeneratesMinimalLtoTopology)
-{
-  auto first  = cudf::test::fixed_width_column_wrapper<int32_t>({1, 2, 3}).release();
-  auto second = cudf::test::fixed_width_column_wrapper<int32_t>({4, 5, 6}).release();
-  auto third  = cudf::test::fixed_width_column_wrapper<int32_t>({7, 8, 9}).release();
-  auto table  = cudf::table_view{{*first, *second, *third}};
-
-  auto ast_tree    = cudf::ast::tree{};
-  auto& first_ref  = ast_tree.push(cudf::ast::column_reference{0});
-  auto& second_ref = ast_tree.push(cudf::ast::column_reference{1});
-  auto& third_ref  = ast_tree.push(cudf::ast::column_reference{2});
-  auto& add        = ast_tree.push(
-    cudf::ast::operation{cudf::ast::ast_operator::ADD, first_ref, second_ref});
-  auto& multiply = ast_tree.push(
-    cudf::ast::operation{cudf::ast::ast_operator::MUL, add, third_ref});
-  std::reference_wrapper<cudf::ast::expression const> expressions[]{add, multiply};
-
-  auto transform_args =
-    row_ir::ast_converter::compute_columns(row_ir::target::CUDA,
-                                           expressions,
-                                           table,
-                                           cudf::table_view{},
-                                           "expression",
-                                           cudf::get_default_stream(),
-                                           cudf::get_current_device_resource_ref());
-
-  ASSERT_TRUE(transform_args.lto_udf.has_value());
-  auto const& code = *transform_args.lto_udf;
-  EXPECT_NE(code.find("extern \"C\" __device__ int transform(uint32_t* out_0, uint32_t* out_1"),
-            std::string::npos);
-  auto const add_call = code.find(" = cudf_row_ir_add_u32(");
-  ASSERT_NE(add_call, std::string::npos);
-  EXPECT_EQ(code.find(" = cudf_row_ir_add_u32(", add_call + 1), std::string::npos);
-  EXPECT_NE(code.find(" = cudf_row_ir_mul_u32("), std::string::npos);
-}
-
-TEST_F(RowIRCudaCodeGenTest, AstConversionMultipleOutputsTracksNullAndErrorMetadata)
-{
-  auto nullable =
-    cudf::test::fixed_width_column_wrapper<int32_t>{{1, 2, 3}, {1, 0, 1}}.release();
-  auto valid = cudf::test::fixed_width_column_wrapper<int32_t>({4, 5, 6}).release();
-  auto table = cudf::table_view{{*nullable, *valid}};
-
-  auto nullable_ref = cudf::ast::column_reference{0};
-  auto valid_ref    = cudf::ast::column_reference{1};
-  std::reference_wrapper<cudf::ast::expression const> expressions[]{nullable_ref, valid_ref};
-  auto transform_args =
-    row_ir::ast_converter::compute_columns(row_ir::target::CUDA,
-                                           expressions,
-                                           table,
-                                           cudf::table_view{},
-                                           "expression",
-                                           cudf::get_default_stream(),
-                                           cudf::get_current_device_resource_ref());
-
-  EXPECT_EQ(transform_args.is_null_aware, cudf::null_aware::YES);
-  ASSERT_EQ(transform_args.outputs.size(), 2);
-  EXPECT_EQ(transform_args.outputs[0].nullability, cudf::output_nullability::PRESERVE);
-  EXPECT_EQ(transform_args.outputs[1].nullability, cudf::output_nullability::ALL_VALID);
-  EXPECT_FALSE(transform_args.lto_udf.has_value());
-
-  auto ast_tree = cudf::ast::tree{};
-  auto& add_overflow = cudf::ast::jit::operation(
-    ast_tree, cudf::ast::jit::op::ADD_OVERFLOW, {nullable_ref, valid_ref});
-  std::reference_wrapper<cudf::ast::expression const> fallible_expressions[]{add_overflow};
+  auto tree = cudf::ast::tree{};
+  auto& add_overflow =
+    cudf::ast::jit::operation(tree, cudf::ast::jit::op::ADD_OVERFLOW, {lhs_ref, rhs_ref});
   auto fallible_args =
-    row_ir::ast_converter::compute_columns(row_ir::target::CUDA,
-                                           fallible_expressions,
-                                           table,
-                                           cudf::table_view{},
-                                           "expression",
-                                           cudf::get_default_stream(),
-                                           cudf::get_current_device_resource_ref());
-  EXPECT_TRUE(fallible_args.may_propagate_error);
-  EXPECT_FALSE(fallible_args.lto_udf.has_value());
+    row_ir::ast_converter::compute_column(row_ir::target::CUDA,
+                                          add_overflow,
+                                          table,
+                                          cudf::table_view{},
+                                          "expression",
+                                          cudf::get_default_stream(),
+                                          cudf::get_current_device_resource_ref());
+  EXPECT_FALSE(fallible_args.lto_udf_source.has_value());
 }
 
 TEST_F(RowIRCudaCodeGenTest, FilterPredicate)

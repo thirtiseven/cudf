@@ -10,12 +10,10 @@
 #include <cudf/detail/null_mask.hpp>
 #include <cudf/detail/nvtx/ranges.hpp>
 #include <cudf/detail/transform.hpp>
-#include <cudf/detail/utilities/getenv_or.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/detail/valid_if.cuh>
 #include <cudf/errc.hpp>
 #include <cudf/null_mask.hpp>
-#include <cudf/logger.hpp>
 #include <cudf/stream_compaction.hpp>
 #include <cudf/strings/detail/strings_column_factories.cuh>
 #include <cudf/strings/detail/utilities.hpp>
@@ -37,11 +35,8 @@
 #include <algorithm>
 #include <array>
 #include <numeric>
-#include <optional>
 #include <span>
-#include <string>
 #include <variant>
-#include <vector>
 
 namespace cudf {
 namespace {
@@ -544,7 +539,7 @@ void run_lto(std::optional<std::tuple<std::span<uint8_t const>, lto_binary_type,
              int32_t* d_max_error,
              std::span<uint8_t const> udf_binary,
              lto_binary_type source_type,
-             std::span<rtcx::memory_fragment const> extra_fragments,
+             std::optional<rtcx::memory_fragment> additional_fragment,
              rmm::cuda_stream_view stream,
              rmm::device_async_resource_ref mr)
 {
@@ -564,22 +559,26 @@ void run_lto(std::optional<std::tuple<std::span<uint8_t const>, lto_binary_type,
     kernel_fragment = fragment_blob->view();
   }
 
-  std::vector<rtcx::memory_fragment> memory_fragments;
-  memory_fragments.reserve(2 + extra_fragments.size());
-  memory_fragments.emplace_back(rtcx::memory_fragment{
-      .data = kernel_fragment,
-      .type = as_rtcx_binary_type(kernel_fragment_binary_type),
-      .name = kernel_fragment_id.c_str(),
-    });
-  memory_fragments.emplace_back(rtcx::memory_fragment{
-      .data = udf_binary,
-      .type = as_rtcx_binary_type(source_type),
-      .name = nullptr  // nullptr = unnamed fragment: the binary will be used to hash the UDF
-    });
-  memory_fragments.insert(
-    memory_fragments.end(), extra_fragments.cbegin(), extra_fragments.cend());
+  std::array<rtcx::memory_fragment, 3> memory_fragments{
+    {{
+       .data = kernel_fragment,
+       .type = as_rtcx_binary_type(kernel_fragment_binary_type),
+       .name = kernel_fragment_id.c_str(),
+     },
+     {
+       .data = udf_binary,
+       .type = as_rtcx_binary_type(source_type),
+       .name = nullptr  // nullptr = unnamed fragment: the binary will be used to hash the UDF
+     },
+     {}}};
 
-  auto kernel = get_lto_linked_kernel("cudf/cpp/src/transform/jit/kernel.cu", {}, memory_fragments);
+  auto fragment_count = size_t{2};
+  if (additional_fragment.has_value()) {
+    memory_fragments[fragment_count++] = *additional_fragment;
+  }
+
+  auto kernel = get_lto_linked_kernel(
+    "cudf/cpp/src/transform/jit/kernel.cu", {}, std::span{memory_fragments}.first(fragment_count));
 
   auto [cols, handles] = to_args(inputs, outputs, stream, mr);
   auto* input_cols     = reinterpret_cast<column_device_view_core const*>(cols.data());
@@ -1050,7 +1049,6 @@ auto finalize_outputs(null_aware is_null_aware,
 std::unique_ptr<table> execute_transform(std::string const& udf,
                                          udf_source_type source_type,
                                          null_aware is_null_aware,
-                                         bool may_propagate_error,
                                          std::optional<size_type> in_row_size,
                                          std::optional<void*> user_data,
                                          std::span<transform_input const> inputs,
@@ -1073,10 +1071,7 @@ std::unique_ptr<table> execute_transform(std::string const& udf,
   auto stencil_arg       = stencil.has_value() ? stencil->first : nullptr;
   auto stencil_has_nulls = stencil.has_value() ? (stencil->second > 0) : false;
 
-  std::optional<rmm::device_scalar<int32_t>> d_max_error;
-  if (may_propagate_error) {
-    d_max_error.emplace(static_cast<int32_t>(errc::SUCCESS), stream, mr);
-  }
+  rmm::device_scalar<int32_t> d_max_error(static_cast<int32_t>(errc::SUCCESS), stream, mr);
 
   jit_transform::run(is_null_aware == null_aware::YES,
                      user_data.has_value(),
@@ -1085,18 +1080,19 @@ std::unique_ptr<table> execute_transform(std::string const& udf,
                      user_data.value_or(nullptr),
                      inputs,
                      output_columns,
-                     d_max_error.has_value() ? d_max_error->data() : nullptr,
+                     d_max_error.data(),
                      udf,
                      source_type,
                      stream,
                      mr);
 
-  if (d_max_error.has_value()) {
-    auto const error = static_cast<errc>(d_max_error->value(stream));
-    if (error != errc::SUCCESS) {
+  auto error = static_cast<errc>(d_max_error.value(stream));
+
+  switch (error) {
+    case errc::SUCCESS: break;
+    default:
       throw evaluation_error(
         error, std::format("Transform UDF evaluation failed with error `{}`", to_string(error)));
-    }
   }
 
   auto finalized = finalize_outputs(is_null_aware, row_size, std::move(output_columns), stream, mr);
@@ -1121,7 +1117,6 @@ std::unique_ptr<table> multi_transform(std::string const& udf,
   return execute_transform(udf,
                            source_type,
                            is_null_aware,
-                           true,
                            row_size,
                            user_data,
                            inputs,
@@ -1233,37 +1228,17 @@ dispatch_lto_kernel_fragment(bool is_null_aware,
 
 namespace {
 
-enum class ast_jit_backend { SOURCE, LTO, LTO_WRAPPER_REQUIRED };
-
-ast_jit_backend get_ast_jit_backend()
-{
-  static auto const backend = [] {
-    auto const value = detail::getenv_or("LIBCUDF_AST_JIT_BACKEND", std::string{"source"});
-    if (value == "source") { return ast_jit_backend::SOURCE; }
-    if (value == "lto") { return ast_jit_backend::LTO; }
-    if (value == "lto-wrapper-required") { return ast_jit_backend::LTO_WRAPPER_REQUIRED; }
-    CUDF_FAIL(std::format("Invalid LIBCUDF_AST_JIT_BACKEND value `{}`. Expected source, lto, or "
-                          "lto-wrapper-required.",
-                          value),
-              std::invalid_argument);
-  }();
-  return backend;
-}
-
 rtcx::blob compile_row_ir_topology(std::string const& source)
 {
   char const* include_names[] = {"cudf/detail/row_ir/topology_udf.cuh"};
   char const* headers[]       = {source.c_str()};
-  return get_kernel_fragment("row_ir_topology",
-                             "cudf/cpp/src/jit/row_ir_topology.cu",
-                             include_names,
-                             headers,
-                             "transform");
+  return get_kernel_fragment(
+    "row_ir_topology", "cudf/cpp/src/jit/row_ir_topology.cu", include_names, headers, "transform");
 }
 
-std::span<uint8_t const> get_row_ir_arithmetic_fragment()
+std::span<uint8_t const> get_row_ir_ops_fragment()
 {
-  auto const range = cudf_fragments::file_ranges[cudf_fragments::row_ir_arithmetic_ops];
+  auto const range = cudf_fragments::file_ranges[cudf_fragments::row_ir_ops];
   return cudf_fragments::files.subspan(range[0], range[1]);
 }
 
@@ -1276,9 +1251,7 @@ std::unique_ptr<table> execute_transform_lto(
   std::span<transform_output const> outputs,
   std::vector<std::unique_ptr<column>>&& string_offsets,
   std::optional<size_type> in_row_size,
-  std::span<rtcx::memory_fragment const> extra_fragments,
-  bool require_precompiled_kernel,
-  bool may_propagate_error,
+  std::optional<rtcx::memory_fragment> additional_fragment,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -1294,28 +1267,13 @@ std::unique_ptr<table> execute_transform_lto(
                                                 std::move(string_offsets),
                                                 stream,
                                                 mr);
-  auto const stencil_arg       = stencil.has_value() ? stencil->first : nullptr;
-  auto const stencil_has_nulls = stencil.has_value() ? (stencil->second > 0) : false;
+  auto const stencil_arg         = stencil.has_value() ? stencil->first : nullptr;
+  auto const stencil_has_nulls   = stencil.has_value() ? (stencil->second > 0) : false;
 
   auto const precompiled_kernel_fragment = dispatch_lto_kernel_fragment(
     is_null_aware == null_aware::YES, user_data.has_value(), inputs, output_columns);
-  CUDF_EXPECTS(!require_precompiled_kernel || precompiled_kernel_fragment.has_value(),
-               std::format("No precompiled AST JIT kernel fragment for {} inputs and {} outputs",
-                           inputs.size(),
-                           outputs.size()),
-               std::invalid_argument);
 
-  if (get_context().config().jit_verbose) {
-    CUDF_LOG_INFO("AST JIT backend=lto inputs=%zu outputs=%zu kernel_fragment=%s",
-                  inputs.size(),
-                  outputs.size(),
-                  precompiled_kernel_fragment.has_value() ? "hit" : "miss");
-  }
-
-  std::optional<rmm::device_scalar<int32_t>> d_max_error;
-  if (may_propagate_error) {
-    d_max_error.emplace(static_cast<int32_t>(errc::SUCCESS), stream, mr);
-  }
+  rmm::device_scalar<int32_t> d_max_error(static_cast<int32_t>(errc::SUCCESS), stream, mr);
 
   jit_transform::run_lto(precompiled_kernel_fragment,
                          is_null_aware == null_aware::YES,
@@ -1325,19 +1283,19 @@ std::unique_ptr<table> execute_transform_lto(
                          user_data.value_or(nullptr),
                          inputs,
                          output_columns,
-                         d_max_error.has_value() ? d_max_error->data() : nullptr,
+                         d_max_error.data(),
                          udf,
                          binary_type,
-                         extra_fragments,
+                         additional_fragment,
                          stream,
                          mr);
 
-  if (d_max_error.has_value()) {
-    auto const error = static_cast<errc>(d_max_error->value(stream));
-    if (error != errc::SUCCESS) {
+  auto error = static_cast<errc>(d_max_error.value(stream));
+  switch (error) {
+    case errc::SUCCESS: break;
+    default:
       throw evaluation_error(
         error, std::format("Transform UDF evaluation failed with error `{}`", to_string(error)));
-    }
   }
 
   auto finalized = finalize_outputs(is_null_aware, row_size, std::move(output_columns), stream, mr);
@@ -1366,82 +1324,50 @@ std::unique_ptr<table> transform_lto(std::span<uint8_t const> udf,
                                outputs,
                                std::move(string_offsets),
                                in_row_size,
-                               {},
-                               false,
-                               true,
+                               std::nullopt,
                                stream,
                                mr);
 }
 
-std::unique_ptr<table> compute_columns_jit(
-  table_view const& table,
-  std::span<std::reference_wrapper<ast::expression const> const> expressions,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr)
-{
-  auto args = detail::row_ir::ast_converter::compute_columns(
-    detail::row_ir::target::CUDA, expressions, table, {}, "compute_operation", stream, mr);
-  auto const backend = get_ast_jit_backend();
-
-  if (backend == ast_jit_backend::SOURCE || !args.lto_udf.has_value()) {
-    CUDF_EXPECTS(backend != ast_jit_backend::LTO_WRAPPER_REQUIRED,
-                 "Expression is not supported by the required AST JIT LTO backend",
-                 std::invalid_argument);
-    if (get_context().config().jit_verbose) {
-      CUDF_LOG_INFO("AST JIT backend=source inputs=%zu outputs=%zu lto_eligible=%s",
-                    args.inputs.size(),
-                    args.outputs.size(),
-                    args.lto_udf.has_value() ? "true" : "false");
-    }
-    perform_checks(args.source_type,
-                   args.is_null_aware,
-                   args.row_size,
-                   args.inputs,
-                   args.outputs,
-                   args.string_offsets);
-    return execute_transform(args.udf,
-                             args.source_type,
-                             args.is_null_aware,
-                             args.may_propagate_error,
-                             args.row_size,
-                             args.user_data,
-                             args.inputs,
-                             args.outputs,
-                             std::move(args.string_offsets),
-                             stream,
-                             mr);
-  }
-
-  auto const topology_fragment = compile_row_ir_topology(*args.lto_udf);
-  auto const arithmetic_fragment = get_row_ir_arithmetic_fragment();
-  std::array<rtcx::memory_fragment, 1> operator_fragments{{rtcx::memory_fragment{
-    .data = arithmetic_fragment,
-    .type = rtcx::binary_type::FATBIN,
-    .name = "row_ir_arithmetic_ops",
-  }}};
-  return execute_transform_lto(topology_fragment->view(),
-                               lto_binary_type::LTO_IR,
-                               args.is_null_aware,
-                               args.user_data,
-                               args.inputs,
-                               args.outputs,
-                               std::move(args.string_offsets),
-                               args.row_size,
-                               operator_fragments,
-                               backend == ast_jit_backend::LTO_WRAPPER_REQUIRED,
-                               args.may_propagate_error,
-                               stream,
-                               mr);
-}
-
-std::unique_ptr<column> compute_column_jit(table_view const& table,
+std::unique_ptr<column> compute_column_jit(table_view const& input,
                                            ast::expression const& expr,
                                            rmm::cuda_stream_view stream,
                                            rmm::device_async_resource_ref mr)
 {
-  std::reference_wrapper<ast::expression const> expressions[]{expr};
-  auto result = compute_columns_jit(table, expressions, stream, mr);
-  auto cols   = result->release();
+  auto args = detail::row_ir::ast_converter::compute_column(
+    detail::row_ir::target::CUDA, expr, input, {}, "compute_operation", stream, mr);
+
+  std::unique_ptr<table> result;
+  if (args.lto_udf_source.has_value()) {
+    auto const topology = compile_row_ir_topology(*args.lto_udf_source);
+    auto const ops      = get_row_ir_ops_fragment();
+    auto const ops_fragment =
+      rtcx::memory_fragment{.data = ops, .type = rtcx::binary_type::FATBIN, .name = "row_ir_ops"};
+    result = execute_transform_lto(topology->view(),
+                                   lto_binary_type::LTO_IR,
+                                   args.is_null_aware,
+                                   args.user_data,
+                                   args.inputs,
+                                   args.outputs,
+                                   std::move(args.string_offsets),
+                                   args.row_size,
+                                   ops_fragment,
+                                   stream,
+                                   mr);
+  } else {
+    result = multi_transform(args.udf,
+                             args.source_type,
+                             args.is_null_aware,
+                             args.user_data,
+                             args.inputs,
+                             args.outputs,
+                             std::move(args.string_offsets),
+                             args.row_size,
+                             stream,
+                             mr);
+  }
+
+  auto cols = result->release();
   return std::move(cols[0]);
 }
 
