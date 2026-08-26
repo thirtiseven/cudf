@@ -488,6 +488,193 @@ public class CompiledExpressionTest extends CudfTestBase {
   }
 
   @Test
+  void testJitLiteralWorksWithBothExecutorsAndRepeatedInputs() {
+    AstExpression expr = new BinaryOperation(BinaryOperator.ADD,
+        new ColumnReference(0), Literal.ofInt(7));
+    try (Table firstInput = new Table.TestBuilder().column(1, 2, 3).build();
+         Table secondInput = new Table.TestBuilder().column(10, 20).build();
+         CompiledExpression compiled = expr.compile();
+         ColumnVector regularFirst = compiled.computeColumn(firstInput);
+         ColumnVector jitFirst = compiled.computeColumnJit(firstInput);
+         ColumnVector jitSecond = compiled.computeColumnJit(secondInput);
+         ColumnVector regularSecond = compiled.computeColumn(secondInput);
+         ColumnVector expectedFirst = ColumnVector.fromInts(8, 9, 10);
+         ColumnVector expectedSecond = ColumnVector.fromInts(17, 27)) {
+      assertColumnsAreEqual(expectedFirst, regularFirst);
+      assertColumnsAreEqual(expectedFirst, jitFirst);
+      assertColumnsAreEqual(expectedSecond, jitSecond);
+      assertColumnsAreEqual(expectedSecond, regularSecond);
+    }
+  }
+
+  @Test
+  void testJitStringLiterals() {
+    AstExpression lessThan = new BinaryOperation(BinaryOperator.LESS,
+        new ColumnReference(0), Literal.ofString("ccc"));
+    AstExpression nullEqual = new BinaryOperation(BinaryOperator.NULL_EQUAL,
+        new ColumnReference(0), Literal.ofString(null));
+    try (Table input = new Table.TestBuilder().column("a", null, "ccc", "dddd").build();
+         CompiledExpression lessThanCompiled = lessThan.compile();
+         CompiledExpression nullEqualCompiled = nullEqual.compile();
+         ColumnVector actualLessThan = lessThanCompiled.computeColumnJit(input);
+         ColumnVector actualNullEqual = nullEqualCompiled.computeColumnJit(input);
+         ColumnVector expectedLessThan =
+             ColumnVector.fromBoxedBooleans(true, null, false, false);
+         ColumnVector expectedNullEqual =
+             ColumnVector.fromBoxedBooleans(false, true, false, false)) {
+      assertColumnsAreEqual(expectedLessThan, actualLessThan);
+      assertColumnsAreEqual(expectedNullEqual, actualNullEqual);
+    }
+  }
+
+  @Test
+  void testJitMultipleOutputTransform() {
+    AstExpression firstSum = new JitOperation(JitOperator.ADD,
+        new ColumnReference(0), new ColumnReference(1));
+    AstExpression multiply = new JitOperation(JitOperator.MUL,
+        firstSum, Literal.ofInt(2));
+    AstExpression secondSum = new JitOperation(JitOperator.ADD,
+        new ColumnReference(0), new ColumnReference(1));
+    AstExpression subtract = new JitOperation(JitOperator.SUB,
+        secondSum, new ColumnReference(2));
+
+    Table actual;
+    try (Table input = new Table.TestBuilder()
+             .column(1, 2, 3, 4)
+             .column(10, 20, 30, 40)
+             .column(2, 3, 4, 5)
+             .build();
+         CompiledExpression multiplyCompiled = multiply.compile();
+         CompiledExpression subtractCompiled = subtract.compile();
+         CompiledExpression sumCompiled = secondSum.compile()) {
+      actual = CompiledExpression.computeTableJit(
+          input, multiplyCompiled, subtractCompiled, sumCompiled);
+    }
+
+    try (Table result = actual;
+         ColumnVector expectedMultiply = ColumnVector.fromInts(22, 44, 66, 88);
+         ColumnVector expectedSubtract = ColumnVector.fromInts(9, 19, 29, 39);
+         ColumnVector expectedSum = ColumnVector.fromInts(11, 22, 33, 44)) {
+      Assertions.assertEquals(3, result.getNumberOfColumns());
+      assertColumnsAreEqual(expectedMultiply, result.getColumn(0));
+      assertColumnsAreEqual(expectedSubtract, result.getColumn(1));
+      assertColumnsAreEqual(expectedSum, result.getColumn(2));
+    }
+  }
+
+  @Test
+  void testJitMultipleOutputPerOutputNullability() {
+    AstExpression isNull = new UnaryOperation(
+        UnaryOperator.IS_NULL, new ColumnReference(0));
+    AstExpression sum = new JitOperation(JitOperator.ADD,
+        new ColumnReference(0), new ColumnReference(1));
+    try (Table input = new Table.TestBuilder()
+             .column(1, null, 3, null)
+             .column(10, 20, 30, 40)
+             .build();
+         CompiledExpression isNullCompiled = isNull.compile();
+         CompiledExpression sumCompiled = sum.compile();
+         Table actual = CompiledExpression.computeTableJit(
+             input, isNullCompiled, sumCompiled);
+         ColumnVector expectedIsNull =
+             ColumnVector.fromBoxedBooleans(false, true, false, true);
+         ColumnVector expectedSum = ColumnVector.fromBoxedInts(11, null, 33, null)) {
+      assertColumnsAreEqual(expectedIsNull, actual.getColumn(0));
+      assertColumnsAreEqual(expectedSum, actual.getColumn(1));
+    }
+  }
+
+  @Test
+  void testJitMultipleOutputIndependentNullMasks() {
+    AstExpression first = new UnaryOperation(
+        UnaryOperator.IDENTITY, new ColumnReference(0));
+    AstExpression second = new UnaryOperation(
+        UnaryOperator.IDENTITY, new ColumnReference(1));
+    try (Table input = new Table.TestBuilder()
+             .column(1, null, 3, null)
+             .column(10, 20, null, null)
+             .build();
+         CompiledExpression firstCompiled = first.compile();
+         CompiledExpression secondCompiled = second.compile();
+         Table actual = CompiledExpression.computeTableJit(
+             input, firstCompiled, secondCompiled);
+         ColumnVector expectedFirst = ColumnVector.fromBoxedInts(1, null, 3, null);
+         ColumnVector expectedSecond = ColumnVector.fromBoxedInts(10, 20, null, null)) {
+      assertColumnsAreEqual(expectedFirst, actual.getColumn(0));
+      assertColumnsAreEqual(expectedSecond, actual.getColumn(1));
+    }
+  }
+
+  @Test
+  void testJitMultipleOutputEmptyInput() {
+    AstExpression identity = new UnaryOperation(
+        UnaryOperator.IDENTITY, new ColumnReference(0));
+    AstExpression sum = new JitOperation(JitOperator.ADD,
+        new ColumnReference(0), Literal.ofInt(1));
+    try (ColumnVector empty = ColumnVector.fromInts();
+         Table input = new Table(empty);
+         CompiledExpression identityCompiled = identity.compile();
+         CompiledExpression sumCompiled = sum.compile();
+         Table actual = CompiledExpression.computeTableJit(
+             input, identityCompiled, sumCompiled);
+         ColumnVector expected = ColumnVector.fromInts()) {
+      Assertions.assertEquals(2, actual.getNumberOfColumns());
+      assertColumnsAreEqual(expected, actual.getColumn(0));
+      assertColumnsAreEqual(expected, actual.getColumn(1));
+    }
+  }
+
+  @Test
+  void testJitMultipleOutputValidation() {
+    AstExpression expr = new JitOperation(JitOperator.ADD,
+        new ColumnReference(0), Literal.ofInt(1));
+    try (Table input = new Table.TestBuilder().column(1, 2, 3).build();
+         CompiledExpression compiled = expr.compile()) {
+      Assertions.assertThrows(NullPointerException.class,
+          () -> CompiledExpression.computeTableJit(null, compiled));
+      Assertions.assertThrows(NullPointerException.class,
+          () -> CompiledExpression.computeTableJit(input, (CompiledExpression[]) null));
+      Assertions.assertThrows(IllegalArgumentException.class,
+          () -> CompiledExpression.computeTableJit(input));
+      Assertions.assertThrows(NullPointerException.class,
+          () -> CompiledExpression.computeTableJit(input, compiled, null));
+    }
+
+    CompiledExpression closedExpression = expr.compile();
+    closedExpression.close();
+    try (Table input = new Table.TestBuilder().column(1, 2, 3).build()) {
+      Assertions.assertThrows(IllegalStateException.class,
+          () -> CompiledExpression.computeTableJit(input, closedExpression));
+    }
+
+    try (Table closedTable = new Table.TestBuilder().column(1, 2, 3).build();
+         CompiledExpression compiled = expr.compile()) {
+      closedTable.close();
+      Assertions.assertThrows(IllegalStateException.class,
+          () -> CompiledExpression.computeTableJit(closedTable, compiled));
+    }
+  }
+
+  @Test
+  void testJitMultipleOutputFailureDoesNotConsumeInputs() {
+    AstExpression valid = new JitOperation(JitOperator.ADD,
+        new ColumnReference(0), Literal.ofInt(1));
+    AstExpression invalid = new JitOperation(JitOperator.ADD,
+        new ColumnReference(1), Literal.ofInt(1));
+    try (Table input = new Table.TestBuilder().column(1, 2, 3).build();
+         CompiledExpression validCompiled = valid.compile();
+         CompiledExpression invalidCompiled = invalid.compile()) {
+      Assertions.assertThrows(CudfException.class,
+          () -> CompiledExpression.computeTableJit(
+              input, validCompiled, invalidCompiled).close());
+      try (ColumnVector actual = validCompiled.computeColumnJit(input);
+           ColumnVector expected = ColumnVector.fromInts(2, 3, 4)) {
+        assertColumnsAreEqual(expected, actual);
+      }
+    }
+  }
+
+  @Test
   void testJitEmptyInputTransform() {
     JitOperation expr = new JitOperation(JitOperator.ADD,
         new ColumnReference(0), Literal.ofInt(1));

@@ -12,6 +12,8 @@ import ai.rapids.cudf.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Objects;
+
 /** This class wraps a native compiled AST and must be closed to avoid native memory leaks. */
 public class CompiledExpression implements AutoCloseable {
   static {
@@ -74,7 +76,14 @@ public class CompiledExpression implements AutoCloseable {
    * @return new column computed from this expression applied to the input table
    */
   public ColumnVector computeColumn(Table table) {
-    return new ColumnVector(computeColumn(cleaner.nativeHandle, table.getNativeView()));
+    long result;
+    try {
+      result = computeColumn(cleaner.nativeHandle, table.getNativeView());
+    } finally {
+      reachabilityFence(this);
+      reachabilityFence(table);
+    }
+    return new ColumnVector(result);
   }
 
   /**
@@ -87,7 +96,67 @@ public class CompiledExpression implements AutoCloseable {
    *         {@link TableReference#RIGHT}, or if JIT compilation or evaluation fails
    */
   public ColumnVector computeColumnJit(Table table) {
-    return new ColumnVector(computeColumnJit(cleaner.nativeHandle, table.getNativeView()));
+    long result;
+    try {
+      result = computeColumnJit(cleaner.nativeHandle, table.getNativeView());
+    } finally {
+      reachabilityFence(this);
+      reachabilityFence(table);
+    }
+    return new ColumnVector(result);
+  }
+
+  /**
+   * Compute a new table by applying expressions to the input table in one multi-output JIT
+   * transform. Output column {@code i} contains the result of {@code expressions[i]}.
+   *
+   * @param table input table for the expressions
+   * @param expressions non-empty expressions to evaluate in output order
+   * @return table containing one output column per expression
+   * @throws NullPointerException if the table, expression array, or an expression is null
+   * @throws IllegalArgumentException if no expressions are provided
+   * @throws IllegalStateException if the table or an expression is closed
+   * @throws ai.rapids.cudf.CudfException if JIT compilation or evaluation fails
+   */
+  public static Table computeTableJit(Table table, CompiledExpression... expressions) {
+    Objects.requireNonNull(table, "table");
+    Objects.requireNonNull(expressions, "expressions");
+    if (expressions.length == 0) {
+      throw new IllegalArgumentException("At least one expression is required");
+    }
+
+    long tableHandle = table.getNativeView();
+    if (tableHandle == 0) {
+      throw new IllegalStateException("Table is closed");
+    }
+
+    CompiledExpression[] expressionRefs = expressions.clone();
+    long[] nativeHandles = new long[expressionRefs.length];
+    for (int i = 0; i < expressionRefs.length; i++) {
+      CompiledExpression expression = Objects.requireNonNull(
+          expressionRefs[i], "expression " + i + " is null");
+      nativeHandles[i] = expression.cleaner.nativeHandle;
+      if (nativeHandles[i] == 0) {
+        throw new IllegalStateException("Expression " + i + " is closed");
+      }
+    }
+
+    long[] result;
+    try {
+      result = computeTableJitNative(nativeHandles, tableHandle);
+    } finally {
+      reachabilityFence(table);
+      reachabilityFence(expressionRefs);
+    }
+    return new Table(result);
+  }
+
+  private static void reachabilityFence(Object object) {
+    if (object != null) {
+      synchronized (object) {
+        // The monitor operation is a Java 8 reachability fence.
+      }
+    }
   }
 
   @Override
@@ -109,5 +178,6 @@ public class CompiledExpression implements AutoCloseable {
   private static native long compile(byte[] serializedExpression);
   private static native long computeColumn(long astHandle, long tableHandle);
   private static native long computeColumnJit(long astHandle, long tableHandle);
+  private static native long[] computeTableJitNative(long[] astHandles, long tableHandle);
   private static native void destroy(long handle);
 }

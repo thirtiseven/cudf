@@ -293,10 +293,10 @@ cudf::ast::table_reference jni_to_table_reference(jbyte jni_value)
 struct make_literal {
   /** Construct an AST literal from a numeric value */
   template <typename T, std::enable_if_t<cudf::is_numeric<T>()>* = nullptr>
-  cudf::ast::literal const& operator()(cudf::data_type dtype,
-                                       bool is_valid,
-                                       cudf::jni::ast::compiled_expr& compiled_expr,
-                                       jni_serialized_ast& jni_ast) const
+  cudf::jni::ast::expression_pair operator()(cudf::data_type dtype,
+                                             bool is_valid,
+                                             cudf::jni::ast::compiled_expr& compiled_expr,
+                                             jni_serialized_ast& jni_ast) const
   {
     std::unique_ptr<cudf::scalar> scalar_ptr = cudf::make_numeric_scalar(dtype);
     scalar_ptr->set_valid_async(is_valid);
@@ -312,10 +312,10 @@ struct make_literal {
 
   /** Construct an AST literal from a timestamp value */
   template <typename T, std::enable_if_t<cudf::is_timestamp<T>()>* = nullptr>
-  cudf::ast::literal const& operator()(cudf::data_type dtype,
-                                       bool is_valid,
-                                       cudf::jni::ast::compiled_expr& compiled_expr,
-                                       jni_serialized_ast& jni_ast) const
+  cudf::jni::ast::expression_pair operator()(cudf::data_type dtype,
+                                             bool is_valid,
+                                             cudf::jni::ast::compiled_expr& compiled_expr,
+                                             jni_serialized_ast& jni_ast) const
   {
     std::unique_ptr<cudf::scalar> scalar_ptr = cudf::make_timestamp_scalar(dtype);
     scalar_ptr->set_valid_async(is_valid);
@@ -331,10 +331,10 @@ struct make_literal {
 
   /** Construct an AST literal from a duration value */
   template <typename T, std::enable_if_t<cudf::is_duration<T>()>* = nullptr>
-  cudf::ast::literal const& operator()(cudf::data_type dtype,
-                                       bool is_valid,
-                                       cudf::jni::ast::compiled_expr& compiled_expr,
-                                       jni_serialized_ast& jni_ast) const
+  cudf::jni::ast::expression_pair operator()(cudf::data_type dtype,
+                                             bool is_valid,
+                                             cudf::jni::ast::compiled_expr& compiled_expr,
+                                             jni_serialized_ast& jni_ast) const
   {
     std::unique_ptr<cudf::scalar> scalar_ptr = cudf::make_duration_scalar(dtype);
     scalar_ptr->set_valid_async(is_valid);
@@ -350,10 +350,10 @@ struct make_literal {
 
   /** Construct an AST literal from a string value */
   template <typename T, std::enable_if_t<std::is_same_v<T, cudf::string_view>>* = nullptr>
-  cudf::ast::literal const& operator()(cudf::data_type dtype,
-                                       bool is_valid,
-                                       cudf::jni::ast::compiled_expr& compiled_expr,
-                                       jni_serialized_ast& jni_ast) const
+  cudf::jni::ast::expression_pair operator()(cudf::data_type dtype,
+                                             bool is_valid,
+                                             cudf::jni::ast::compiled_expr& compiled_expr,
+                                             jni_serialized_ast& jni_ast) const
   {
     std::unique_ptr<cudf::scalar> scalar_ptr = [&]() {
       if (is_valid) {
@@ -370,10 +370,10 @@ struct make_literal {
 
   /** Construct an AST literal from a fixed-point value */
   template <typename T, std::enable_if_t<cudf::is_fixed_point<T>()>* = nullptr>
-  cudf::ast::literal const& operator()(cudf::data_type dtype,
-                                       bool is_valid,
-                                       cudf::jni::ast::compiled_expr& compiled_expr,
-                                       jni_serialized_ast& jni_ast) const
+  cudf::jni::ast::expression_pair operator()(cudf::data_type dtype,
+                                             bool is_valid,
+                                             cudf::jni::ast::compiled_expr& compiled_expr,
+                                             jni_serialized_ast& jni_ast) const
   {
     using rep_type = typename T::rep;
     auto const val = is_valid ? jni_ast.read<rep_type>() : rep_type{};
@@ -390,26 +390,26 @@ struct make_literal {
             std::enable_if_t<!cudf::is_numeric<T>() && !cudf::is_timestamp<T>() &&
                              !cudf::is_duration<T>() && !cudf::is_fixed_point<T>() &&
                              !std::is_same_v<T, cudf::string_view>>* = nullptr>
-  cudf::ast::literal const& operator()(cudf::data_type dtype,
-                                       bool is_valid,
-                                       cudf::jni::ast::compiled_expr& compiled_expr,
-                                       jni_serialized_ast& jni_ast) const
+  cudf::jni::ast::expression_pair operator()(cudf::data_type dtype,
+                                             bool is_valid,
+                                             cudf::jni::ast::compiled_expr& compiled_expr,
+                                             jni_serialized_ast& jni_ast) const
   {
     throw std::logic_error("Unsupported AST literal type");
   }
 };
 
 /** Decode a serialized AST literal */
-cudf::ast::literal const& compile_literal(bool is_valid,
-                                          cudf::jni::ast::compiled_expr& compiled_expr,
-                                          jni_serialized_ast& jni_ast)
+cudf::jni::ast::expression_pair compile_literal(bool is_valid,
+                                                cudf::jni::ast::compiled_expr& compiled_expr,
+                                                jni_serialized_ast& jni_ast)
 {
   auto const dtype = jni_ast.read_cudf_type();
   return cudf::type_dispatcher(dtype, make_literal{}, dtype, is_valid, compiled_expr, jni_ast);
 }
 
 /** Decode a serialized AST column reference */
-cudf::ast::column_reference const& compile_column_reference(
+cudf::jni::ast::expression_pair compile_column_reference(
   cudf::jni::ast::compiled_expr& compiled_expr, jni_serialized_ast& jni_ast)
 {
   auto const table_ref               = jni_to_table_reference(jni_ast.read_byte());
@@ -418,7 +418,7 @@ cudf::ast::column_reference const& compile_column_reference(
 }
 
 /** Decode a serialized AST column name reference */
-cudf::ast::column_name_reference const& compile_column_name_reference(
+cudf::jni::ast::expression_pair compile_column_name_reference(
   cudf::jni::ast::compiled_expr& compiled_expr, jni_serialized_ast& jni_ast)
 {
   std::string column_name = jni_ast.read<std::string>();
@@ -426,31 +426,31 @@ cudf::ast::column_name_reference const& compile_column_name_reference(
 }
 
 // forward declaration
-cudf::ast::expression const& compile_expression(cudf::jni::ast::compiled_expr& compiled_expr,
-                                                jni_serialized_ast& jni_ast);
+cudf::jni::ast::expression_pair compile_expression(cudf::jni::ast::compiled_expr& compiled_expr,
+                                                   jni_serialized_ast& jni_ast);
 
 /** Decode a serialized AST unary expression */
-cudf::ast::operation const& compile_unary_expression(cudf::jni::ast::compiled_expr& compiled_expr,
-                                                     jni_serialized_ast& jni_ast)
+cudf::jni::ast::expression_pair compile_unary_expression(
+  cudf::jni::ast::compiled_expr& compiled_expr, jni_serialized_ast& jni_ast)
 {
-  auto const ast_op                             = jni_to_unary_operator(jni_ast.read_byte());
-  cudf::ast::expression const& child_expression = compile_expression(compiled_expr, jni_ast);
+  auto const ast_op           = jni_to_unary_operator(jni_ast.read_byte());
+  auto const child_expression = compile_expression(compiled_expr, jni_ast);
   return compiled_expr.add_operation(ast_op, child_expression);
 }
 
 /** Decode a serialized AST binary expression */
-cudf::ast::operation const& compile_binary_expression(cudf::jni::ast::compiled_expr& compiled_expr,
-                                                      jni_serialized_ast& jni_ast)
+cudf::jni::ast::expression_pair compile_binary_expression(
+  cudf::jni::ast::compiled_expr& compiled_expr, jni_serialized_ast& jni_ast)
 {
-  auto const ast_op                        = jni_to_binary_operator(jni_ast.read_byte());
-  cudf::ast::expression const& left_child  = compile_expression(compiled_expr, jni_ast);
-  cudf::ast::expression const& right_child = compile_expression(compiled_expr, jni_ast);
+  auto const ast_op      = jni_to_binary_operator(jni_ast.read_byte());
+  auto const left_child  = compile_expression(compiled_expr, jni_ast);
+  auto const right_child = compile_expression(compiled_expr, jni_ast);
   return compiled_expr.add_operation(ast_op, left_child, right_child);
 }
 
 /** Decode a serialized JIT AST expression */
-cudf::ast::expression const& compile_jit_expression(cudf::jni::ast::compiled_expr& compiled_expr,
-                                                    jni_serialized_ast& jni_ast)
+cudf::jni::ast::expression_pair compile_jit_expression(cudf::jni::ast::compiled_expr& compiled_expr,
+                                                       jni_serialized_ast& jni_ast)
 {
   auto const jni_op_value     = jni_ast.read_byte();
   auto const op_info          = jni_to_jit_operator(jni_op_value);
@@ -493,21 +493,18 @@ cudf::ast::expression const& compile_jit_expression(cudf::jni::ast::compiled_exp
                   op_info.arity));
   }
 
-  std::vector<std::reference_wrapper<cudf::ast::expression const>> args;
+  std::vector<cudf::jni::ast::expression_pair> args;
   args.reserve(arity);
   for (int32_t index = 0; index < arity; ++index) {
     args.emplace_back(compile_expression(compiled_expr, jni_ast));
   }
 
-  return compiled_expr.add_jit_expression(
-    [&](cudf::ast::tree& tree) -> cudf::ast::expression const& {
-      return cudf::ast::jit::operation(tree, op_info.op, args, error_policy, target_scale);
-    });
+  return compiled_expr.add_jit_operation(op_info.op, args, error_policy, target_scale);
 }
 
 /** Decode a serialized AST expression by reading the expression type and dispatching */
-cudf::ast::expression const& compile_expression(cudf::jni::ast::compiled_expr& compiled_expr,
-                                                jni_serialized_ast& jni_ast)
+cudf::jni::ast::expression_pair compile_expression(cudf::jni::ast::compiled_expr& compiled_expr,
+                                                   jni_serialized_ast& jni_ast)
 {
   auto const expression_type = static_cast<jni_serialized_expression_type>(jni_ast.read_byte());
   switch (expression_type) {
@@ -549,7 +546,9 @@ jlong execute_compiled_expression(jlong j_ast, jlong j_table, execution_backend 
 {
   auto compiled_expr_ptr = reinterpret_cast<cudf::jni::ast::compiled_expr const*>(j_ast);
   auto tview_ptr         = reinterpret_cast<cudf::table_view const*>(j_table);
-  auto const& expression = compiled_expr_ptr->get_top_expression();
+  auto const& expression = backend == execution_backend::JIT
+                             ? compiled_expr_ptr->get_jit_top_expression()
+                             : compiled_expr_ptr->get_top_expression();
   std::unique_ptr<cudf::column> result = backend == execution_backend::JIT
                                            ? cudf::compute_column_jit(*tview_ptr, expression)
                                            : cudf::compute_column(*tview_ptr, expression);
@@ -605,6 +604,34 @@ JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_ast_CompiledExpression_computeColumn
     return execute_compiled_expression(j_ast, j_table, execution_backend::JIT);
   }
   JNI_CATCH(env, 0);
+}
+
+JNIEXPORT jlongArray JNICALL Java_ai_rapids_cudf_ast_CompiledExpression_computeTableJitNative(
+  JNIEnv* env, jclass, jlongArray j_asts, jlong j_table)
+{
+  JNI_NULL_CHECK(env, j_asts, "Compiled AST pointer array is null", nullptr);
+  JNI_NULL_CHECK(env, j_table, "Table view pointer is null", nullptr);
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    cudf::jni::native_jlongArray ast_handles(env, j_asts);
+    if (ast_handles.size() == 0) { throw std::invalid_argument("At least one AST is required"); }
+
+    std::vector<std::reference_wrapper<cudf::ast::expression const>> expressions;
+    expressions.reserve(ast_handles.size());
+    for (auto const handle : ast_handles) {
+      if (handle == 0) { throw std::invalid_argument("Compiled AST pointer is null"); }
+      auto const* compiled_expr_ptr =
+        reinterpret_cast<cudf::jni::ast::compiled_expr const*>(handle);
+      expressions.emplace_back(compiled_expr_ptr->get_jit_top_expression());
+    }
+    ast_handles.cancel();
+
+    auto const* tview_ptr = reinterpret_cast<cudf::table_view const*>(j_table);
+    return cudf::jni::convert_table_for_return(env,
+                                               cudf::compute_table_jit(*tview_ptr, expressions));
+  }
+  JNI_CATCH(env, nullptr);
 }
 
 JNIEXPORT void JNICALL Java_ai_rapids_cudf_ast_CompiledExpression_destroy(JNIEnv* env,
