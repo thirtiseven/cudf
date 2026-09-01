@@ -91,6 +91,8 @@ class compiled_expr {
 
   [[nodiscard]] bool has_literals() const { return !scalars.empty(); }
 
+  [[nodiscard]] bool has_jit_literals() const { return !scalar_columns.empty(); }
+
   [[nodiscard]] bool is_jit() const { return mode == compilation_mode::JIT; }
 
   void release_jit_staging_scalars()

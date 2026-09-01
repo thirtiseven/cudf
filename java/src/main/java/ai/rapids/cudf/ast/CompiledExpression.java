@@ -125,19 +125,7 @@ public class CompiledExpression implements AutoCloseable {
     }
 
     CompiledExpression[] expressionRefs = expressions.clone();
-    long[] nativeHandles = new long[expressionRefs.length];
-    for (int i = 0; i < expressionRefs.length; i++) {
-      CompiledExpression expression = Objects.requireNonNull(
-          expressionRefs[i], "expression " + i + " is null");
-      if (expression.mode != CompilationMode.JIT) {
-        throw new IllegalArgumentException("Expression " + i + " was not compiled for JIT");
-      }
-      nativeHandles[i] = expression.cleaner.nativeHandle;
-      if (nativeHandles[i] == 0) {
-        throw new IllegalStateException("Expression " + i + " is closed");
-      }
-    }
-
+    long[] nativeHandles = getJitNativeHandles(expressionRefs);
     long[] result;
     try {
       result = computeTableJitNative(nativeHandles, tableHandle);
@@ -148,7 +136,23 @@ public class CompiledExpression implements AutoCloseable {
     return new Table(result);
   }
 
-  private static void reachabilityFence(Object object) {
+  static long[] getJitNativeHandles(CompiledExpression[] expressions) {
+    long[] nativeHandles = new long[expressions.length];
+    for (int i = 0; i < expressions.length; i++) {
+      CompiledExpression expression = Objects.requireNonNull(
+          expressions[i], "expression " + i + " is null");
+      if (expression.mode != CompilationMode.JIT) {
+        throw new IllegalArgumentException("Expression " + i + " was not compiled for JIT");
+      }
+      nativeHandles[i] = expression.cleaner.nativeHandle;
+      if (nativeHandles[i] == 0) {
+        throw new IllegalStateException("Expression " + i + " is closed");
+      }
+    }
+    return nativeHandles;
+  }
+
+  static void reachabilityFence(Object object) {
     if (object != null) {
       synchronized (object) {
         // The monitor operation is a Java 8 reachability fence.
