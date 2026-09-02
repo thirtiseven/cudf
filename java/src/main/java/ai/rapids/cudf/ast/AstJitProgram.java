@@ -17,6 +17,7 @@ import java.util.Objects;
  * A reusable AST JIT program specialized to an input schema.
  * Construction lowers the expressions and retrieves their JIT kernel. Subsequent calls reuse that
  * kernel with tables whose referenced columns have compatible types and nullability.
+ * Callers must ensure that {@link #close()} does not overlap with {@link #computeTable(Table)}.
  */
 public final class AstJitProgram implements AutoCloseable {
   static {
@@ -106,6 +107,7 @@ public final class AstJitProgram implements AutoCloseable {
   /**
    * Evaluate this program on a table with a compatible referenced-column schema.
    * The row count and unreferenced columns may differ from the schema table used at compilation.
+   * Calling {@link #close()} while an evaluation is in progress is unsupported.
    *
    * @param table input table for expression evaluation
    * @return table containing the program outputs in expression order

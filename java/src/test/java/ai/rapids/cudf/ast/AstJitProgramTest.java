@@ -27,6 +27,7 @@ public class AstJitProgramTest extends CudfTestBase {
     try (Table schemaTable = new Table.TestBuilder()
              .column(1, 2, 3)
              .column(10, 20, 30)
+             .column(100, 200, 300)
              .build();
          CompiledExpression multiplyCompiled = multiply.compileJit();
          CompiledExpression sumCompiled = sum.compileJit()) {
@@ -44,6 +45,7 @@ public class AstJitProgramTest extends CudfTestBase {
          Table secondInput = new Table.TestBuilder()
              .column(6, 7, 8, 9)
              .column(60, 70, 80, 90)
+             .column(600L, 700L, 800L, 900L)
              .build();
          Table secondResult = closeableProgram.computeTable(secondInput);
          ColumnVector secondMultiply = ColumnVector.fromInts(132, 154, 176, 198);
@@ -54,6 +56,26 @@ public class AstJitProgramTest extends CudfTestBase {
       Assertions.assertEquals(2, secondResult.getNumberOfColumns());
       assertColumnsAreEqual(secondMultiply, secondResult.getColumn(0));
       assertColumnsAreEqual(secondSum, secondResult.getColumn(1));
+    }
+  }
+
+  @Test
+  void testReusesSingleOutputProgram() {
+    AstExpression expression = new JitOperation(JitOperator.ADD,
+        new ColumnReference(0), Literal.ofInt(1));
+    try (Table schemaTable = new Table.TestBuilder().column(1, 2, 3).build();
+         CompiledExpression compiled = expression.compileJit();
+         AstJitProgram program = AstJitProgram.compile(schemaTable, compiled);
+         Table firstInput = new Table.TestBuilder().column(4, 5).build();
+         Table firstResult = program.computeTable(firstInput);
+         ColumnVector firstExpected = ColumnVector.fromInts(5, 6);
+         Table secondInput = new Table.TestBuilder().column(6, 7, 8, 9).build();
+         Table secondResult = program.computeTable(secondInput);
+         ColumnVector secondExpected = ColumnVector.fromInts(7, 8, 9, 10)) {
+      Assertions.assertEquals(1, firstResult.getNumberOfColumns());
+      assertColumnsAreEqual(firstExpected, firstResult.getColumn(0));
+      Assertions.assertEquals(1, secondResult.getNumberOfColumns());
+      assertColumnsAreEqual(secondExpected, secondResult.getColumn(0));
     }
   }
 
