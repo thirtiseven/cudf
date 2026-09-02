@@ -44,7 +44,7 @@ JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_ast_AstJitProgram_create(JNIEnv* env
     auto const stream = cudf::get_default_stream();
     auto program      = std::make_unique<cudf::transform_program>(*table, expressions, stream);
     // Construction inputs may be released by a thread with a different default stream.
-    if (has_literals) { stream.synchronize(); }
+    if (has_literals) { stream.sync(); }
     return reinterpret_cast<jlong>(program.release());
   }
   JNI_CATCH(env, 0);

@@ -544,7 +544,7 @@ std::unique_ptr<cudf::jni::ast::compiled_expr> compile_serialized_ast(
 
   // The expression may be handed to a thread with a different default stream.
   if (jni_expr_ptr->has_literals()) {
-    cudf::get_default_stream().synchronize();
+    cudf::get_default_stream().sync();
     // JIT literals retain only the copied one-row columns after construction completes.
     jni_expr_ptr->release_jit_staging_scalars();
   }
