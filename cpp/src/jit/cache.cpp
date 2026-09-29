@@ -16,6 +16,7 @@
 #define XXH_INLINE_ALL
 #include <xxhash.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -24,6 +25,16 @@
 namespace CUDF_EXPORT cudf {
 
 namespace {
+
+std::string make_time_profile_option(std::string const& tmp_dir)
+{
+  // Compiler stages may use different working directories; isolate their output per compilation.
+  auto trace_dir = std::format("{}/jit-trace-XXXXXX", std::filesystem::absolute(tmp_dir).string());
+  CUDF_EXPECTS(::mkdtemp(trace_dir.data()) != nullptr,
+               std::format("Failed to create JIT trace directory in: {}", tmp_dir),
+               std::runtime_error);
+  return std::format("--fdevice-time-trace={}/compile", trace_dir);
+}
 
 void hash(XXH3_state_t* ctx, std::span<char const> input)
 {
@@ -264,7 +275,7 @@ std::tuple<rtcx::library, rtcx::blob> compile_library(
   if (cfg.dump_jit_trace) { options.emplace_back("--time=-"); }
 
   if (cfg.dump_jit_time_profile) {
-    options.emplace_back(std::format("--fdevice-time-trace=cudf_kernel_{}_trace", name));
+    options.emplace_back(make_time_profile_option(cfg.jit_tmp_dir));
   }
 
   std::vector<char const*> options_cstr;
@@ -347,7 +358,7 @@ rtcx::blob compile_fragment(char const* name,
   if (cfg.dump_jit_trace) { options.emplace_back("--time=-"); }
 
   if (cfg.dump_jit_time_profile) {
-    options.emplace_back(std::format("--fdevice-time-trace=cudf_kernel_{}_trace", name));
+    options.emplace_back(make_time_profile_option(cfg.jit_tmp_dir));
   }
 
   std::vector<char const*> options_cstr;
