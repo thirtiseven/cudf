@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2019-2024, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -12,6 +12,16 @@
 namespace cudf {
 namespace io {
 namespace csv {
+// Relative offsets halve per-cell staging for inputs that fit below the null sentinel.
+struct compact_string_index_pair {
+  static constexpr uint32_t null_offset = UINT32_MAX;
+
+  uint32_t offset{null_offset};
+  uint32_t length{0};
+};
+
+static_assert(sizeof(compact_string_index_pair) == 8);
+
 namespace column_parse {
 /**
  * @brief Per-column parsing flags used for dtype detection and data conversion

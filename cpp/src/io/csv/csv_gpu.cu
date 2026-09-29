@@ -384,9 +384,15 @@ CUDF_KERNEL void __launch_bounds__(csvparse_block_dim)
           }
           // Track whether this field was quoted (for doublequote unescaping)
           if (is_quoted_output != nullptr) { is_quoted_output[rec_id] = was_quoted; }
-          auto str_list = static_cast<std::pair<char const*, size_t>*>(columns[actual_col]);
-          str_list[rec_id].first  = field_start;
-          str_list[rec_id].second = end - field_start;
+          if (data.size() < compact_string_index_pair::null_offset) {
+            auto str_list    = static_cast<compact_string_index_pair*>(columns[actual_col]);
+            str_list[rec_id] = {static_cast<uint32_t>(field_start - raw_csv),
+                                static_cast<uint32_t>(end - field_start)};
+          } else {
+            auto str_list = static_cast<std::pair<char const*, size_t>*>(columns[actual_col]);
+            str_list[rec_id].first  = field_start;
+            str_list[rec_id].second = end - field_start;
+          }
         } else {
           if (cudf::type_dispatcher(dtypes[actual_col],
                                     ConvertFunctor{},
@@ -403,9 +409,14 @@ CUDF_KERNEL void __launch_bounds__(csvparse_block_dim)
           }
         }
       } else if (dtypes[actual_col].id() == cudf::type_id::STRING) {
-        auto str_list           = static_cast<std::pair<char const*, size_t>*>(columns[actual_col]);
-        str_list[rec_id].first  = nullptr;
-        str_list[rec_id].second = 0;
+        if (data.size() < compact_string_index_pair::null_offset) {
+          auto str_list    = static_cast<compact_string_index_pair*>(columns[actual_col]);
+          str_list[rec_id] = {};
+        } else {
+          auto str_list = static_cast<std::pair<char const*, size_t>*>(columns[actual_col]);
+          str_list[rec_id].first  = nullptr;
+          str_list[rec_id].second = 0;
+        }
         if (is_quoted_output != nullptr) { is_quoted_output[rec_id] = false; }
       }
       ++actual_col;
