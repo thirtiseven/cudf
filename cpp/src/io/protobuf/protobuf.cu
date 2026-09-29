@@ -17,6 +17,12 @@
 
 namespace cudf::io::protobuf {
 
+decode_protobuf_options_builder decode_protobuf_options::builder(
+  std::vector<nested_field_descriptor> schema)
+{
+  return decode_protobuf_options_builder{std::move(schema)};
+}
+
 namespace detail {
 
 std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const& schema,

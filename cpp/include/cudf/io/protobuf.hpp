@@ -246,12 +246,6 @@ class decode_protobuf_options_builder {
   decode_protobuf_options _options;
 };
 
-inline decode_protobuf_options_builder decode_protobuf_options::builder(
-  std::vector<nested_field_descriptor> schema)
-{
-  return decode_protobuf_options_builder{std::move(schema)};
-}
-
 /**
  * @brief Decode serialized protobuf messages into a STRUCT column.
  *
