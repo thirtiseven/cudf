@@ -677,7 +677,7 @@ decode_result decode_data(parse_options const& parse_opts,
         indices =
           std::make_unique<rmm::device_uvector<compact_string_index_pair>>(num_records, stream);
         // Short rows leave missing fields untouched; zero is a valid offset, not a null.
-        thrust::fill(rmm::exec_policy_nosync(stream),
+        thrust::fill(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      indices->begin(),
                      indices->end(),
                      compact_string_index_pair{});
