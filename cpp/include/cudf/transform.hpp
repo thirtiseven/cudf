@@ -114,6 +114,12 @@ struct transform_output_spec {
     {};  ///< Specifications of string offsets or nested child columns
 };
 
+/** @brief Backend preference for reusable AST JIT programs. */
+enum class ast_jit_backend {
+  CUDA,  ///< Compile generated CUDA source
+  LTO    ///< Link a fixed ABI wrapper and operators; fall back for unsupported expressions
+};
+
 /**
  * @brief A reusable transform program that retains a JIT-compiled kernel.
  *
@@ -191,6 +197,27 @@ struct transform_program {
                     std::span<std::reference_wrapper<ast::expression const> const> expressions,
                     cuda::stream_ref stream           = cudf::get_default_stream(),
                     rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+  /**
+   * @brief Constructs an AST program with an explicit backend preference.
+   *
+   * LTO currently supports same-width INT32/INT64 ADD, MUL, and IDENTITY. Unsupported
+   * expressions use CUDA source JIT. Compilation, linking, and evaluation errors propagate.
+   *
+   * @param table Table supplying the referenced-column schema
+   * @param expressions Output expressions
+   * @param backend Preferred compilation backend
+   * @param stream CUDA stream used during construction
+   * @param mr Device memory resource used during construction
+   */
+  transform_program(table_view const& table,
+                    std::span<std::reference_wrapper<ast::expression const> const> expressions,
+                    ast_jit_backend backend,
+                    cuda::stream_ref stream           = cudf::get_default_stream(),
+                    rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+  /** @brief Whether this program actually uses precompiled Row IR operators. */
+  [[nodiscard]] bool uses_lto() const;
 
   /**
    * @brief Move constructor for transform_program

@@ -7,10 +7,13 @@
 
 #include "cudf_test/column_wrapper.hpp"
 
+#include <cudf_test/column_utilities.hpp>
 #include <cudf_test/debug_utilities.hpp>
 #include <cudf_test/testing_main.hpp>
 
 #include <cudf/column/column_factories.hpp>
+#include <cudf/copying.hpp>
+#include <cudf/table/table.hpp>
 #include <cudf/transform.hpp>
 
 #include <cuda/iterator>
@@ -477,6 +480,52 @@ return cudf::errc::SUCCESS;
   EXPECT_EQ(code, expected_code);
   EXPECT_EQ(null_aware, cudf::null_aware::NO);
   EXPECT_EQ(nullability.size(), 2);
+}
+
+TEST_F(RowIRCudaCodeGenTest, FixedAbiCrossOutputCSE)
+{
+  auto ref = cudf::ast::column_reference{3};
+  auto sum = cudf::ast::operation{cudf::ast::ast_operator::ADD, ref, ref};
+  auto mul = cudf::ast::operation{cudf::ast::ast_operator::MUL, sum, ref};
+  std::array<std::reference_wrapper<cudf::ast::expression const>, 2> expressions{sum, mul};
+  auto args = row_ir::ast_converter::compute_table(row_ir::target::LTO,
+                                                   expressions,
+                                                   table,
+                                                   {},
+                                                   "compute_operation",
+                                                   cudf::get_default_stream(),
+                                                   cudf::get_current_device_resource_ref());
+
+  ASSERT_TRUE(args.uses_lto);
+  EXPECT_NE(args.udf.find("cudf_row_ir_fixed_transform("), std::string::npos);
+  auto add = args.udf.find("cudf_row_ir_add_u32(");
+  ASSERT_NE(add, std::string::npos);
+  EXPECT_EQ(args.udf.find("cudf_row_ir_add_u32(", add + 1), std::string::npos);
+  EXPECT_NE(args.udf.find("cudf_row_ir_mul_u32("), std::string::npos);
+  EXPECT_EQ(args.udf.find("row_ir::evaluate"), std::string::npos);
+  EXPECT_EQ(args.inputs.size(), 1);
+  EXPECT_EQ(args.outputs.size(), 2);
+}
+
+TEST_F(RowIRCudaCodeGenTest, FixedAbiSlicedInputs)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> ints{{99, 3, 4, 5, 99}, {1, 1, 0, 1, 1}};
+  cudf::test::fixed_width_column_wrapper<int64_t> longs{{99, 7, 8, 9, 99}, {1, 0, 1, 1, 1}};
+  auto sliced_ints  = cudf::slice(ints, {1, 4});
+  auto sliced_longs = cudf::slice(longs, {1, 4});
+  cudf::table_view input{{sliced_ints[0], sliced_longs[0]}};
+  auto left    = cudf::ast::column_reference{0};
+  auto right   = cudf::ast::column_reference{1};
+  auto sum     = cudf::ast::operation{cudf::ast::ast_operator::ADD, left, left};
+  auto product = cudf::ast::operation{cudf::ast::ast_operator::MUL, right, right};
+  std::array<std::reference_wrapper<cudf::ast::expression const>, 2> expressions{sum, product};
+  cudf::transform_program program{input, expressions, cudf::ast_jit_backend::LTO};
+  ASSERT_TRUE(program.uses_lto());
+  auto result = program.run(input);
+  cudf::test::fixed_width_column_wrapper<int32_t> expected_ints{{6, 0, 10}, {1, 0, 1}};
+  cudf::test::fixed_width_column_wrapper<int64_t> expected_longs{{0, 64, 81}, {0, 1, 1}};
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_ints, result->view().column(0));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_longs, result->view().column(1));
 }
 
 CUDF_TEST_PROGRAM_MAIN()

@@ -46,7 +46,8 @@ namespace row_ir {
  * @brief The target for which the IR is generated.
  */
 enum class target {
-  CUDA = 0  /// < CUDA C++
+  CUDA = 0,  ///< CUDA C++
+  LTO        ///< Link a fixed ABI wrapper and operators; fall back for unsupported nodes
 };
 
 /**
@@ -93,6 +94,7 @@ struct [[nodiscard]] transform_args {
   std::vector<std::optional<int32_t>> input_table_sources  = {};
   std::vector<std::optional<int32_t>> input_column_indices = {};
   std::string udf                                          = {};
+  bool uses_lto                                            = false;
   udf_source_type source_type                              = cudf::udf_source_type::CUDA;
   null_aware is_null_aware                                 = null_aware::NO;
   std::optional<void*> user_data                           = std::nullopt;
@@ -429,6 +431,9 @@ struct [[nodiscard]] node {
    */
   [[nodiscard]] opcode get_opcode() const;
 
+  /// Whether this instantiated subtree has a matching precompiled operator implementation.
+  [[nodiscard]] bool supports_lto() const;
+
   /** @brief Get the arguments of the operation
    * @return A span of unique pointers to the arguments of the operation
    */
@@ -471,6 +476,7 @@ struct [[nodiscard]] node {
 struct [[nodiscard]] ast_converter {
  private:
   std::vector<std::unique_ptr<row_ir::node>> output_irs_;  ///< The output IR nodes
+  bool uses_lto_ = false;
   cuda::stream_ref stream_;  ///< CUDA stream used for device memory operations and kernel launches.
   rmm::device_async_resource_ref
     mr_;  ///< Device memory resource used to allocate the returned table's device memory

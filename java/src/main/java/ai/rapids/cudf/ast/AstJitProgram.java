@@ -97,15 +97,51 @@ public final class AstJitProgram implements AutoCloseable {
    * @throws ai.rapids.cudf.CudfException if JIT compilation fails
    */
   public static AstJitProgram compile(Table schemaTable, CompiledExpression... expressions) {
+    return compile(schemaTable, false, expressions);
+  }
+
+  /**
+   * Compile with an optional preference for precompiled LTO operators.
+   * The experimental LTO backend uses one precompiled fixed-ABI wrapper and supports
+   * same-width INT32/INT64 ADD, MUL, and IDENTITY.
+   * Unsupported expressions fall back to CUDA source JIT; compilation and linking errors propagate.
+   * Use {@link #usesLto()} to distinguish actual LTO programs from source-JIT fallback.
+   *
+   * @param schemaTable table supplying the referenced-column schema
+   * @param preferLto whether to try precompiled operators before CUDA source JIT
+   * @param expressions non-empty JIT-compiled expressions in output order
+   * @return a reusable AST JIT program with the ownership rules of {@link #compile(Table,
+   *         CompiledExpression...)}
+   */
+  public static AstJitProgram compile(Table schemaTable, boolean preferLto,
+      CompiledExpression... expressions) {
     long tableHandle = Objects.requireNonNull(schemaTable, "schemaTable").getNativeView();
     CompiledExpression.JitExpressionArgs expressionArgs =
         CompiledExpression.getJitExpressionArgs(expressions, tableHandle);
 
     try {
-      return new AstJitProgram(create(expressionArgs.nativeHandles, tableHandle));
+      return new AstJitProgram(preferLto
+          ? createWithLto(expressionArgs.nativeHandles, tableHandle)
+          : create(expressionArgs.nativeHandles, tableHandle));
     } finally {
       CompiledExpression.reachabilityFence(schemaTable);
       CompiledExpression.reachabilityFence(expressionArgs.expressionRefs);
+    }
+  }
+
+  /**
+   * @return whether this program actually uses precompiled LTO operators
+   * @throws IllegalStateException if the program is closed
+   */
+  public boolean usesLto() {
+    long programHandle = cleaner.nativeHandle;
+    if (programHandle == 0) {
+      throw new IllegalStateException("AST JIT program is closed");
+    }
+    try {
+      return usesLtoNative(programHandle);
+    } finally {
+      CompiledExpression.reachabilityFence(this);
     }
   }
 
@@ -151,6 +187,8 @@ public final class AstJitProgram implements AutoCloseable {
   }
 
   private static native long create(long[] astHandles, long tableHandle);
+  private static native long createWithLto(long[] astHandles, long tableHandle);
+  private static native boolean usesLtoNative(long programHandle);
   private static native long[] computeTableNative(long programHandle, long tableHandle);
   private static native void destroy(long handle);
 }

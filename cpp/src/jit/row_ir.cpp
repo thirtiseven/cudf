@@ -609,6 +609,23 @@ std::optional<int32_t> node::get_target_scale() const { return target_scale_; }
 
 opcode node::get_opcode() const { return op_; }
 
+bool node::supports_lto() const
+{
+  if (type_.id() != type_id::INT32 && type_.id() != type_id::INT64) { return false; }
+  if (error_policy_ != error_policy::PROPAGATE) { return false; }
+  switch (op_) {
+    case opcode::GET_INPUT:
+    case opcode::SET_OUTPUT:
+    case opcode::IDENTITY:
+    case opcode::ADD:
+    case opcode::MUL: break;
+    default: return false;
+  }
+  return std::all_of(args_.begin(), args_.end(), [&](auto const& arg) {
+    return arg->get_type() == type_ && arg->supports_lto();
+  });
+}
+
 std::span<std::unique_ptr<node> const> node::get_args() const { return args_; }
 
 bool node::is_null_aware() const
@@ -658,6 +675,12 @@ bool node::is_always_valid() const
 std::string to_cuda_type(cudf::data_type type, bool nullable)
 {
   auto name = type_to_name(type);
+  return nullable ? std::format("cuda::std::optional<{}>", name) : name;
+}
+
+std::string to_lto_type(cudf::data_type type, bool nullable)
+{
+  auto name = type.id() == type_id::INT32 ? "uint32_t" : "uint64_t";
   return nullable ? std::format("cuda::std::optional<{}>", name) : name;
 }
 
@@ -720,6 +743,40 @@ void node::emit_code(instance_context& instance, target_info const& info, code_s
   }
 
   switch (info.id) {
+    case target::LTO: {
+      auto type = to_lto_type(type_, instance.has_nulls());
+      switch (op_) {
+        case opcode::GET_INPUT:
+          sink.emit(
+            std::format("{} {} = {};\n",
+                        type,
+                        id_,
+                        instance.get_input_vars()[std::get<input_reference>(reference_).index].id));
+          break;
+        case opcode::SET_OUTPUT:
+          sink.emit(
+            std::format("*{} = {};\n",
+                        instance.get_output_vars()[std::get<output_reference>(reference_).index].id,
+                        args_[0]->get_id()));
+          break;
+        case opcode::IDENTITY:
+          sink.emit(std::format("{} {} = {};\n", type, id_, args_[0]->get_id()));
+          break;
+        case opcode::ADD:
+        case opcode::MUL:
+          sink.emit(std::format("{} {} = cudf_row_ir_{}_{}{}({}, {});\n",
+                                type,
+                                id_,
+                                op_ == opcode::ADD ? "add" : "mul",
+                                type_.id() == type_id::INT32 ? "u32" : "u64",
+                                instance.has_nulls() ? "_nullable" : "",
+                                args_[0]->get_id(),
+                                args_[1]->get_id()));
+          break;
+        default: CUDF_FAIL("Unsupported Row IR LTO operator", std::invalid_argument);
+      }
+      break;
+    }
     case target::CUDA: {
       auto type = to_cuda_type(type_, instance.has_nulls());
 
@@ -929,18 +986,31 @@ std::tuple<std::string, null_aware, std::vector<output_nullability>> ast_convert
 
   target_info target{target_id};
 
-  CUDF_EXPECTS(
-    target.id == target::CUDA, "Unsupported target for code generation", std::invalid_argument);
+  if (target.id == target::LTO && !std::all_of(output_irs_.begin(),
+                                               output_irs_.end(),
+                                               [](auto const& ir) { return ir->supports_lto(); })) {
+    target.id = target::CUDA;
+  }
+  uses_lto_ = target.id == target::LTO;
+
+  CUDF_EXPECTS(target.id == target::CUDA || uses_lto_,
+               "Unsupported target for code generation",
+               std::invalid_argument);
+
+  auto type_name = [&](data_type type) {
+    return uses_lto_ ? to_lto_type(type, instance_.has_nulls())
+                     : to_cuda_type(type, instance_.has_nulls());
+  };
 
   auto output_decl = [&](auto i) {
     auto& var = instance_.output_vars_[i];
     auto& ir  = output_irs_[i];
-    return std::format("{}* {}", to_cuda_type(ir->get_type(), instance_.has_nulls()), var.id);
+    return std::format("{}* {}", type_name(ir->get_type()), var.id);
   };
 
   auto input_decl = [&](auto i) {
     auto& var = instance_.input_vars_[i];
-    return std::format("{} {}", to_cuda_type(var.type, instance_.has_nulls()), var.id);
+    return std::format("{} {}", type_name(var.type), var.id);
   };
 
   std::vector<std::string> arg_decls;
@@ -967,13 +1037,47 @@ std::tuple<std::string, null_aware, std::vector<output_nullability>> ast_convert
   }();
 
   code_sink sink;
-  sink.emit(std::format("__device__ cudf::errc {}(", function_name));
+  if (uses_lto_) {
+    sink.emit(
+      "#include <jit/row_ir_lto.cuh>\nextern \"C\" __device__ int cudf_row_ir_fixed_transform(");
+    args_decl = "int row, unsigned active, void const* inputs, void const* outputs";
+  } else {
+    sink.emit(std::format("__device__ cudf::errc {}(", function_name));
+  }
   sink.emit(args_decl);
   sink.emit(")\n{\n");
+  auto io_suffix = [&](data_type type) {
+    return std::string{type.id() == type_id::INT32 ? "u32" : "u64"} +
+           (instance_.has_nulls() ? "_nullable" : "");
+  };
+  if (uses_lto_) {
+    for (size_t i = 0; i < instance_.input_vars_.size(); ++i) {
+      auto const& var = instance_.input_vars_[i];
+      auto row        = std::holds_alternative<scalar_input>(instance_.inputs_[i]) ? "0" : "row";
+      sink.emit(std::format(
+        "auto {} = cudf_row_ir_load_{}(inputs, {}, {});\n", var.id, io_suffix(var.type), i, row));
+    }
+    for (size_t i = 0; i < instance_.output_vars_.size(); ++i) {
+      auto const& var = instance_.output_vars_[i];
+      sink.emit(std::format("{} fixed_out_{}{{}}; auto* {} = &fixed_out_{};\n",
+                            type_name(output_irs_[i]->get_type()),
+                            i,
+                            var.id,
+                            i));
+    }
+  }
   for (auto& ir : output_irs_) {
     ir->emit_code(instance_, target, sink);
   }
-  sink.emit("return cudf::errc::SUCCESS;\n}");
+  if (uses_lto_) {
+    for (size_t i = 0; i < instance_.output_vars_.size(); ++i) {
+      sink.emit(std::format("cudf_row_ir_store_{}(outputs, {}, row, active, fixed_out_{});\n",
+                            io_suffix(output_irs_[i]->get_type()),
+                            i,
+                            i));
+    }
+  }
+  sink.emit(uses_lto_ ? "return 0;\n}" : "return cudf::errc::SUCCESS;\n}");
   return {
     sink.get_code(), generate_null_aware_udf ? null_aware::YES : null_aware::NO, null_policies};
 }
@@ -1044,6 +1148,7 @@ transform_args ast_converter::compute_table(
                                  .input_table_sources  = std::move(table_sources),
                                  .input_column_indices = std::move(column_indices),
                                  .udf                  = std::move(code),
+                                 .uses_lto             = converter.uses_lto_,
                                  .source_type          = cudf::udf_source_type::CUDA,
                                  .is_null_aware        = is_null_aware,
                                  .user_data            = std::nullopt,

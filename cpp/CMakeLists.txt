@@ -642,6 +642,13 @@ endfunction()
 
 precompile_fixed_width_kernel_fragments()
 precompile_string_kernel_fragments()
+foreach(FRAGMENT IN ITEMS row_ir_operators row_ir_fixed_kernel row_ir_io)
+  get_property(FILE_INDEX TARGET cudf_fragments__embed_props PROPERTY EMBED_FILE_INDEX)
+  add_fragment(
+    cudf_fragments FRAGMENT ${FRAGMENT} SOURCE src/transform/jit/${FRAGMENT}.cu
+    ARRAY_IDS ${FRAGMENT}_FILE_INDEX ARRAY_VALUES ${FILE_INDEX}
+  )
+endforeach()
 
 rtcx_embed(cudf_fragments COMPRESSION none OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/embed")
 

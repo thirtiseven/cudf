@@ -13,12 +13,12 @@
 #include <stdexcept>
 #include <vector>
 
-extern "C" {
+namespace {
 
-JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_ast_AstJitProgram_create(JNIEnv* env,
-                                                                     jclass,
-                                                                     jlongArray j_asts,
-                                                                     jlong j_table)
+jlong create_ast_program(JNIEnv* env,
+                         jlongArray j_asts,
+                         jlong j_table,
+                         cudf::ast_jit_backend backend)
 {
   JNI_NULL_CHECK(env, j_asts, "Compiled AST pointer array is null", 0);
   JNI_NULL_CHECK(env, j_table, "Table view pointer is null", 0);
@@ -42,12 +42,41 @@ JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_ast_AstJitProgram_create(JNIEnv* env
 
     auto const* table = reinterpret_cast<cudf::table_view const*>(j_table);
     auto const stream = cudf::get_default_stream();
-    auto program      = std::make_unique<cudf::transform_program>(*table, expressions, stream);
+    auto program = std::make_unique<cudf::transform_program>(*table, expressions, backend, stream);
     // Construction inputs may be released by a thread with a different default stream.
     if (has_literals) { stream.sync(); }
     return reinterpret_cast<jlong>(program.release());
   }
   JNI_CATCH(env, 0);
+}
+
+}  // namespace
+
+extern "C" {
+
+JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_ast_AstJitProgram_create(JNIEnv* env,
+                                                                     jclass,
+                                                                     jlongArray j_asts,
+                                                                     jlong j_table)
+{
+  return create_ast_program(env, j_asts, j_table, cudf::ast_jit_backend::CUDA);
+}
+
+JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_ast_AstJitProgram_createWithLto(JNIEnv* env,
+                                                                            jclass,
+                                                                            jlongArray j_asts,
+                                                                            jlong j_table)
+{
+  return create_ast_program(env, j_asts, j_table, cudf::ast_jit_backend::LTO);
+}
+
+JNIEXPORT jboolean JNICALL Java_ai_rapids_cudf_ast_AstJitProgram_usesLtoNative(JNIEnv* env,
+                                                                               jclass,
+                                                                               jlong j_program)
+{
+  JNI_NULL_CHECK(env, j_program, "AST JIT program pointer is null", JNI_FALSE);
+  JNI_TRY { return reinterpret_cast<cudf::transform_program const*>(j_program)->uses_lto(); }
+  JNI_CATCH(env, JNI_FALSE);
 }
 
 JNIEXPORT jlongArray JNICALL Java_ai_rapids_cudf_ast_AstJitProgram_computeTableNative(
