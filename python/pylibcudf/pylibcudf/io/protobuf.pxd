@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from pylibcudf.column cimport Column
@@ -15,6 +15,7 @@ cpdef Column decode_protobuf(
     list enum_valid_values,
     list enum_names,
     bint fail_on_errors,
+    list output_fields = *,
     object stream = *,
     DeviceMemoryResource mr = *,
 )

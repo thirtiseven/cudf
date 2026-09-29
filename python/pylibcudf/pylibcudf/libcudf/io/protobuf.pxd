@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from libc.stdint cimport int32_t, int64_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint8_t, uint32_t
 from libcpp cimport bool
 from libcpp.memory cimport unique_ptr
 from libcpp.vector cimport vector
@@ -10,7 +10,6 @@ from pylibcudf.libcudf.column.column cimport column
 from pylibcudf.libcudf.column.column_view cimport column_view
 from pylibcudf.libcudf.types cimport type_id
 from cuda.bindings.cyruntime cimport cudaStream_t
-from rmm.librmm.device_buffer cimport device_buffer
 from rmm.librmm.memory_resource cimport device_async_resource_ref
 
 
@@ -22,7 +21,7 @@ cdef extern from "cudf/io/protobuf.hpp" namespace "cudf::io::protobuf" nogil:
         ZIGZAG
         ENUM_STRING
 
-    cpdef enum class proto_wire_type(int):
+    cpdef enum class proto_wire_type(uint32_t):
         VARINT
         I64BIT
         LEN
@@ -41,19 +40,21 @@ cdef extern from "cudf/io/protobuf.hpp" namespace "cudf::io::protobuf" nogil:
         bool is_required
         bool has_default_value
 
-    cdef struct decode_protobuf_options:
+    cdef cppclass decode_protobuf_options:
+        decode_protobuf_options() except +libcudf_exception_handler
         vector[nested_field_descriptor] schema
         vector[int64_t] default_ints
         vector[double] default_floats
-        vector[uint8_t] default_bools
+        vector[bool] default_bools
         vector[vector[uint8_t]] default_strings
         vector[vector[int32_t]] enum_valid_values
         vector[vector[vector[uint8_t]]] enum_names
         bool fail_on_errors
+        vector[bool] output_fields
 
     cdef unique_ptr[column] decode_protobuf(
         column_view binary_input,
-        decode_protobuf_options options,
+        const decode_protobuf_options& options,
         cudaStream_t stream,
         device_async_resource_ref mr,
     ) except +libcudf_exception_handler

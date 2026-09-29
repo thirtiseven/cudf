@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from rmm.pylibrmm.memory_resource import DeviceMemoryResource
@@ -18,6 +18,7 @@ def decode_protobuf(
     enum_valid_values: list[list[int]],
     enum_names: list[list[bytes]],
     fail_on_errors: bool,
+    output_fields: list[bool] | None = None,
     stream: CudaStreamLike | None = None,
     mr: DeviceMemoryResource | None = None,
 ) -> Column: ...

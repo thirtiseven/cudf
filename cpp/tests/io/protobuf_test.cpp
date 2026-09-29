@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -14,12 +14,14 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/io/protobuf.hpp>
 #include <cudf/lists/lists_column_view.hpp>
+#include <cudf/null_mask.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/types.hpp>
 
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <tuple>
 #include <vector>
 
 namespace pb = cudf::io::protobuf;
@@ -102,25 +104,18 @@ std::unique_ptr<cudf::column> make_binary_column(std::vector<std::vector<uint8_t
       num_rows, std::move(offsets_col), std::move(data_col), null_count, std::move(null_mask));
   }
 
-  return cudf::make_lists_column(
-    num_rows, std::move(offsets_col), std::move(data_col), 0, rmm::device_buffer{});
+  return cudf::make_lists_column(num_rows,
+                                 std::move(offsets_col),
+                                 std::move(data_col),
+                                 0,
+                                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 pb::decode_protobuf_options make_scalar_options(std::vector<int> const& field_numbers,
                                                 std::vector<cudf::type_id> const& types,
-                                                std::vector<int> const& encodings,
                                                 bool fail_on_errors = true)
 {
-  int const n = static_cast<int>(field_numbers.size());
-
-  auto derive_wire_type = [](cudf::type_id type, int enc) -> pb::proto_wire_type {
-    if (enc == static_cast<int>(pb::proto_encoding::FIXED)) {
-      if (type == cudf::type_id::INT64 || type == cudf::type_id::UINT64 ||
-          type == cudf::type_id::FLOAT64) {
-        return pb::proto_wire_type::I64BIT;
-      }
-      return pb::proto_wire_type::I32BIT;
-    }
+  auto derive_wire_type = [](cudf::type_id type) -> pb::proto_wire_type {
     switch (type) {
       case cudf::type_id::FLOAT32: return pb::proto_wire_type::I32BIT;
       case cudf::type_id::FLOAT64: return pb::proto_wire_type::I64BIT;
@@ -132,22 +127,68 @@ pb::decode_protobuf_options make_scalar_options(std::vector<int> const& field_nu
   };
 
   std::vector<pb::nested_field_descriptor> schema;
-  schema.reserve(n);
-  for (int i = 0; i < n; ++i) {
+  schema.reserve(field_numbers.size());
+  for (size_t i = 0; i < field_numbers.size(); ++i) {
     schema.push_back({field_numbers[i],
                       -1,
                       0,
-                      derive_wire_type(types[i], encodings[i]),
+                      derive_wire_type(types[i]),
                       types[i],
-                      static_cast<pb::proto_encoding>(encodings[i]),
+                      pb::proto_encoding::DEFAULT,
                       false,
                       false,
                       false});
   }
-
   return pb::decode_protobuf_options::builder(std::move(schema))
     .fail_on_errors(fail_on_errors)
     .build();
+}
+
+pb::decode_protobuf_options make_numeric_enum_options(int64_t default_value)
+{
+  return pb::decode_protobuf_options::builder({{.field_number      = 1,
+                                                .parent_idx        = -1,
+                                                .wire_type         = pb::proto_wire_type::VARINT,
+                                                .output_type       = cudf::type_id::INT32,
+                                                .encoding          = pb::proto_encoding::DEFAULT,
+                                                .has_default_value = true}})
+    .default_ints({default_value})
+    .enum_valid_values({{0, 1, 2}})
+    .build();
+}
+
+// [0: id(INT32), 1: inner(STRUCT), 2: name(STRING, parent=1)]
+std::vector<pb::nested_field_descriptor> make_nested_schema()
+{
+  return {
+    {1,
+     -1,
+     0,
+     pb::proto_wire_type::VARINT,
+     cudf::type_id::INT32,
+     pb::proto_encoding::DEFAULT,
+     false,
+     false,
+     false},
+    {2,
+     -1,
+     0,
+     pb::proto_wire_type::LEN,
+     cudf::type_id::STRUCT,
+     pb::proto_encoding::DEFAULT,
+     false,
+     false,
+     false},
+    {1,
+     1,
+     1,
+     pb::proto_wire_type::LEN,
+     cudf::type_id::STRING,
+     pb::proto_encoding::DEFAULT,
+     false,
+     false,
+     false},
+  };
 }
 
 }  // anonymous namespace
@@ -179,7 +220,7 @@ TEST_F(ProtobufReaderTest, EmptySchema)
 TEST_F(ProtobufReaderTest, ZeroRows)
 {
   auto input   = make_binary_column({});
-  auto options = make_scalar_options({1, 2}, {cudf::type_id::INT64, cudf::type_id::STRING}, {0, 0});
+  auto options = make_scalar_options({1, 2}, {cudf::type_id::INT64, cudf::type_id::STRING});
 
   auto result = pb::decode_protobuf(*input, options);
 
@@ -192,38 +233,7 @@ TEST_F(ProtobufReaderTest, ZeroRows)
 
 TEST_F(ProtobufReaderTest, ZeroRowsNestedSchema)
 {
-  // [0: id(INT32), 1: inner(STRUCT), 2: name(STRING, parent=1)]
-  std::vector<pb::nested_field_descriptor> schema = {
-    {1,
-     -1,
-     0,
-     pb::proto_wire_type::VARINT,
-     cudf::type_id::INT32,
-     pb::proto_encoding::DEFAULT,
-     false,
-     false,
-     false},
-    {2,
-     -1,
-     0,
-     pb::proto_wire_type::LEN,
-     cudf::type_id::STRUCT,
-     pb::proto_encoding::DEFAULT,
-     false,
-     false,
-     false},
-    {1,
-     1,
-     1,
-     pb::proto_wire_type::LEN,
-     cudf::type_id::STRING,
-     pb::proto_encoding::DEFAULT,
-     false,
-     false,
-     false},
-  };
-
-  auto options = pb::decode_protobuf_options::builder(std::move(schema)).build();
+  auto options = pb::decode_protobuf_options::builder(make_nested_schema()).build();
 
   auto result = pb::decode_protobuf(*make_binary_column({}), options);
 
@@ -262,7 +272,7 @@ TEST_F(ProtobufReaderTest, StubReturnsAllNullWithCorrectTypes)
 {
   auto input = make_binary_column({encode_varint_field(1, 42), encode_string_field(2, "hello")});
 
-  auto options = make_scalar_options({1, 2}, {cudf::type_id::INT64, cudf::type_id::STRING}, {0, 0});
+  auto options = make_scalar_options({1, 2}, {cudf::type_id::INT64, cudf::type_id::STRING});
 
   auto result = pb::decode_protobuf(*input, options);
 
@@ -280,7 +290,7 @@ TEST_F(ProtobufReaderTest, NullInputRowsPropagateToStruct)
   auto msg   = encode_varint_field(1, 42);
   auto input = make_binary_column({msg, {}, msg}, {true, false, true});
 
-  auto options = make_scalar_options({1}, {cudf::type_id::INT64}, {0});
+  auto options = make_scalar_options({1}, {cudf::type_id::INT64});
 
   auto result = pb::decode_protobuf(*input, options);
 
@@ -297,8 +307,7 @@ TEST_F(ProtobufReaderTest, MultipleNumericTypesShape)
                                       cudf::type_id::INT32,
                                       cudf::type_id::INT64,
                                       cudf::type_id::FLOAT32,
-                                      cudf::type_id::FLOAT64},
-                                     {0, 0, 0, 0, 0});
+                                      cudf::type_id::FLOAT64});
 
   auto result = pb::decode_protobuf(*input, options);
 
@@ -308,6 +317,59 @@ TEST_F(ProtobufReaderTest, MultipleNumericTypesShape)
   EXPECT_EQ(result->child(2).type().id(), cudf::type_id::INT64);
   EXPECT_EQ(result->child(3).type().id(), cudf::type_id::FLOAT32);
   EXPECT_EQ(result->child(4).type().id(), cudf::type_id::FLOAT64);
+}
+
+TEST_F(ProtobufReaderTest, OutputFieldsDropHiddenFields)
+{
+  auto input = make_binary_column({encode_varint_field(1, 42), encode_string_field(2, "hello")});
+
+  auto options = pb::decode_protobuf_options::builder(make_nested_schema())
+                   .output_fields({false, true, true})
+                   .build();
+
+  auto result = pb::decode_protobuf(*input, options);
+
+  ASSERT_EQ(result->size(), 2);
+  ASSERT_EQ(result->num_children(), 1);
+  EXPECT_EQ(result->child(0).type().id(), cudf::type_id::STRUCT);
+  EXPECT_EQ(result->child(0).num_children(), 1);
+  EXPECT_EQ(result->child(0).child(0).type().id(), cudf::type_id::STRING);
+
+  auto empty_result = pb::decode_protobuf(*make_binary_column({}), options);
+  ASSERT_EQ(empty_result->num_children(), 1);
+  EXPECT_EQ(empty_result->child(0).type().id(), cudf::type_id::STRUCT);
+}
+
+TEST_F(ProtobufReaderTest, OutputFieldsMustMatchParent)
+{
+  auto input = make_binary_column({encode_varint_field(1, 42)});
+
+  auto options = pb::decode_protobuf_options::builder(make_nested_schema())
+                   .output_fields({true, true, false})
+                   .build();
+  EXPECT_THROW(std::ignore = pb::decode_protobuf(*input, options), std::invalid_argument);
+
+  options.output_fields = {true, true};
+  EXPECT_THROW(std::ignore = pb::decode_protobuf(*input, options), std::invalid_argument);
+}
+
+TEST_F(ProtobufReaderTest, EnumMetadataRequiresEnumType)
+{
+  auto input                   = make_binary_column({encode_varint_field(1, 1)});
+  auto options                 = make_scalar_options({1}, {cudf::type_id::INT64});
+  options.enum_valid_values[0] = {0, 1};
+  EXPECT_THROW(std::ignore = pb::decode_protobuf(*input, options), std::invalid_argument);
+}
+
+TEST_F(ProtobufReaderTest, NumericEnumDefaultMustFitInt32)
+{
+  auto input = make_binary_column({encode_varint_field(1, 1)});
+  EXPECT_NO_THROW(std::ignore = pb::decode_protobuf(*input, make_numeric_enum_options(2)));
+  EXPECT_THROW(std::ignore = pb::decode_protobuf(*input, make_numeric_enum_options(5)),
+               std::invalid_argument);
+  EXPECT_THROW(
+    std::ignore = pb::decode_protobuf(*input, make_numeric_enum_options(int64_t{1} << 42)),
+    std::invalid_argument);
 }
 
 CUDF_TEST_PROGRAM_MAIN()
