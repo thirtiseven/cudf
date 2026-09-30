@@ -994,9 +994,9 @@ TEST_P(CsvStringStagingTest, MissingFields)
     "1,skip,alpha,\"a\"\"b\",\"m\"\"n\",last\n"
     "2,skip,beta,\"c\"\"d\",plain,end\n"
     "3,skip\n";
-  auto dtypes  = std::vector<data_type>(6, dtype<cudf::string_view>());
-  dtypes[0]    = dtype<int32_t>();
-  auto builder = string_staging_options(buffer, dtypes, doublequote);
+  auto const str = dtype<cudf::string_view>();
+  auto builder =
+    string_staging_options(buffer, {dtype<int32_t>(), str, str, str, str, str}, doublequote);
   if (prune) { builder.use_cols_names({"id", "quoted", "tail"}); }
   auto const result = cudf::io::read_csv(builder.build());
 
@@ -1020,9 +1020,9 @@ TEST_P(CsvStringStagingTest, QuoteBranches)
     "id,ignored,plain,quoted,mixed,tail\n"
     "1,skip,alpha,\"a\"\"b\",\"m\"\"n\",last\n"
     "2,skip,beta,\"c\"\"d\",plain,end\n";
-  auto dtypes  = std::vector<data_type>(6, dtype<cudf::string_view>());
-  dtypes[0]    = dtype<int32_t>();
-  auto builder = string_staging_options(buffer, dtypes, doublequote);
+  auto const str = dtype<cudf::string_view>();
+  auto builder =
+    string_staging_options(buffer, {dtype<int32_t>(), str, str, str, str, str}, doublequote);
   if (prune) { builder.use_cols_names({"plain", "quoted", "mixed"}); }
   auto const result = cudf::io::read_csv(builder.build());
 
@@ -1047,10 +1047,10 @@ TEST_P(CsvStringStagingTest, EmptyAndNullFields)
     "2,skip,,x\n"
     "3,skip,NULL,x\n"
     "4,skip\n";
-  auto dtypes = std::vector<data_type>(4, dtype<cudf::string_view>());
-  dtypes[0]   = dtype<int32_t>();
-  auto builder =
-    string_staging_options(buffer, dtypes, doublequote).keep_default_na(false).na_values({"NULL"});
+  auto const str = dtype<cudf::string_view>();
+  auto builder   = string_staging_options(buffer, {dtype<int32_t>(), str, str, str}, doublequote)
+                   .keep_default_na(false)
+                   .na_values({"NULL"});
   if (prune) { builder.use_cols_names({"value"}); }
   auto const result = cudf::io::read_csv(builder.build());
 

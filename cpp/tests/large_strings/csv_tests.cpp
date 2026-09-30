@@ -6,6 +6,7 @@
 #include "large_strings_fixture.hpp"
 
 #include <cudf_test/column_wrapper.hpp>
+#include <cudf_test/file_utilities.hpp>
 #include <cudf_test/table_utilities.hpp>
 
 #include <cudf/io/csv.hpp>
@@ -19,8 +20,9 @@ struct CsvLargeReaderTest : public cudf::test::StringsLargeTest {};
 
 TEST_F(CsvLargeReaderTest, InputExceedsCompactOffsets)
 {
-  cudf::test::TempDirTestEnvironment temp_dir;
-  auto const path = temp_dir.get_temp_dir() + "wide_offsets.csv";
+  // Scoped so the >4 GiB input is removed as soon as the test ends.
+  temp_directory const temp_dir{"csv_large"};
+  auto const path = temp_dir.path() + "wide_offsets.csv";
   {
     std::ofstream output(path, std::ios::binary);
     output << "id,ignored,value\n";

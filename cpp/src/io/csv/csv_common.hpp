@@ -7,8 +7,9 @@
 
 #include "io/utilities/column_type_histogram.hpp"
 
+#include <cuda/std/limits>
+
 #include <cstdint>
-#include <limits>
 
 namespace cudf {
 namespace io {
@@ -18,7 +19,7 @@ namespace csv {
 template <typename OffsetT>
 struct string_offset_pair {
   using offset_type                        = OffsetT;
-  static constexpr offset_type null_offset = std::numeric_limits<offset_type>::max();
+  static constexpr offset_type null_offset = cuda::std::numeric_limits<offset_type>::max();
 
   offset_type offset{null_offset};
   uint32_t length{0};
@@ -30,7 +31,7 @@ using wide_string_offset_pair    = string_offset_pair<uint64_t>;
 static_assert(sizeof(compact_string_offset_pair) == 8);
 
 // Offsets are at most data_size (an empty trailing field), so the sentinel stays unreachable.
-[[nodiscard]] constexpr bool use_compact_string_index(size_t data_size)
+[[nodiscard]] constexpr bool use_compact_string_offsets(size_t data_size)
 {
   return data_size < compact_string_offset_pair::null_offset;
 }
