@@ -309,6 +309,7 @@ CUDF_KERNEL void __launch_bounds__(csvparse_block_dim)
  * @param[out] valid_counts The number of valid fields in each column
  * @param[out] is_quoted_flags Per-column boolean arrays tracking which rows were quoted fields
  */
+template <bool CompactStrings>
 CUDF_KERNEL void __launch_bounds__(csvparse_block_dim)
   convert_csv_to_cudf(cudf::io::parse_options_view options,
                       device_span<char const> data,
@@ -384,7 +385,7 @@ CUDF_KERNEL void __launch_bounds__(csvparse_block_dim)
           }
           // Track whether this field was quoted (for doublequote unescaping)
           if (is_quoted_output != nullptr) { is_quoted_output[rec_id] = was_quoted; }
-          if (data.size() < compact_string_index_pair::null_offset) {
+          if constexpr (CompactStrings) {
             auto str_list    = static_cast<compact_string_index_pair*>(columns[actual_col]);
             str_list[rec_id] = {static_cast<uint32_t>(field_start - raw_csv),
                                 static_cast<uint32_t>(end - field_start)};
@@ -409,7 +410,7 @@ CUDF_KERNEL void __launch_bounds__(csvparse_block_dim)
           }
         }
       } else if (dtypes[actual_col].id() == cudf::type_id::STRING) {
-        if (data.size() < compact_string_index_pair::null_offset) {
+        if constexpr (CompactStrings) {
           auto str_list    = static_cast<compact_string_index_pair*>(columns[actual_col]);
           str_list[rec_id] = {};
         } else {
@@ -879,6 +880,7 @@ void decode_row_column_data(cudf::io::parse_options_view const& options,
                             device_span<cudf::bitmask_type* const> valids,
                             device_span<size_type> valid_counts,
                             device_span<bool* const> is_quoted_flags,
+                            bool compact_strings,
                             cuda::stream_ref stream)
 {
   // Calculate actual block count to use based on records count
@@ -886,15 +888,22 @@ void decode_row_column_data(cudf::io::parse_options_view const& options,
   auto const num_rows   = row_offsets.size() - 1;
   auto const grid_size  = cudf::util::div_rounding_up_safe<size_t>(num_rows, block_size);
 
-  convert_csv_to_cudf<<<grid_size, block_size, 0, stream.get()>>>(options,
-                                                                  data,
-                                                                  column_flags,
-                                                                  row_offsets,
-                                                                  dtypes,
-                                                                  columns,
-                                                                  valids,
-                                                                  valid_counts,
-                                                                  is_quoted_flags);
+  auto const launch = [&](auto kernel) {
+    kernel<<<grid_size, block_size, 0, stream.get()>>>(options,
+                                                       data,
+                                                       column_flags,
+                                                       row_offsets,
+                                                       dtypes,
+                                                       columns,
+                                                       valids,
+                                                       valid_counts,
+                                                       is_quoted_flags);
+  };
+  if (compact_strings) {
+    launch(convert_csv_to_cudf<true>);
+  } else {
+    launch(convert_csv_to_cudf<false>);
+  }
   CUDF_CUDA_TRY(cudaGetLastError());
 }
 

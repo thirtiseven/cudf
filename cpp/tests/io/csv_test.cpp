@@ -1101,6 +1101,37 @@ TEST_F(CsvReaderTest, StringMaterializationResources)
   }
 }
 
+TEST_F(CsvReaderTest, StringStagingUsesTemporaryResource)
+{
+  constexpr int num_rows = 200'000;
+  std::string buffer;
+  for (int row = 0; row < num_rows; ++row) {
+    buffer += "abcde\n";
+  }
+  auto const stream  = cudf::get_default_stream();
+  auto const options = cudf::io::csv_reader_options::builder(
+                         cudf::io::source_info{cudf::host_span<std::byte const>{
+                           reinterpret_cast<std::byte const*>(buffer.data()), buffer.size()}})
+                         .header(-1)
+                         .dtypes(std::vector<data_type>{dtype<cudf::string_view>()})
+                         .build();
+  std::vector<std::string> const values(num_rows, "abcde");
+  cudf::test::strings_column_wrapper const expected(values.begin(), values.end());
+  cudf::test::memory_resource_test_harness resources;
+  // Chars plus offsets fit, but not the 8 bytes per row of index staging on top of them.
+  auto const output_bytes = num_rows * (5 + sizeof(cudf::size_type));
+  rmm::mr::limiting_resource_adaptor output_mr{resources.output_mr(),
+                                               output_bytes + output_bytes / 2};
+  cudf::io::table_with_metadata result;
+  {
+    cudf::test::scoped_current_device_resource current_mr{resources.temporary_mr()};
+    result = cudf::io::read_csv(options, stream, output_mr);
+    resources.synchronize(stream);
+  }
+  resources.expect_temporary_allocations_released(stream);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(expected, result.tbl->view().column(0));
+}
+
 TEST_P(CsvStringStagingTest, WorkerAllocationFailureAndRecovery)
 {
   auto const [doublequote, prune] = GetParam();

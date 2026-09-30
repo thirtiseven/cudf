@@ -221,6 +221,7 @@ void decode_row_column_data(cudf::io::parse_options_view const& options,
                             device_span<cudf::bitmask_type* const> valids,
                             device_span<size_type> valid_counts,
                             device_span<bool* const> is_quoted,
+                            bool compact_strings,
                             cuda::stream_ref stream);
 
 }  // namespace gpu

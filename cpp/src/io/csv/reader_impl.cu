@@ -656,6 +656,7 @@ decode_result decode_data(parse_options const& parse_opts,
                           int32_t num_records,
                           int32_t num_actual_columns,
                           int32_t num_active_columns,
+                          bool track_quoted_fields,
                           cuda::stream_ref stream,
                           rmm::device_async_resource_ref mr)
 {
@@ -664,7 +665,7 @@ decode_result decode_data(parse_options const& parse_opts,
   out_buffers.reserve(column_types.size());
   std::vector<std::unique_ptr<rmm::device_uvector<compact_string_index_pair>>> string_indices(
     num_active_columns);
-  auto const use_compact_strings = data.size() < compact_string_index_pair::null_offset;
+  auto const use_compact_strings = use_compact_string_index(data.size());
 
   for (int col = 0, active_col = 0; col < num_actual_columns; ++col) {
     if (column_flags[col] & column_parse::enabled) {
@@ -697,11 +698,11 @@ decode_result decode_data(parse_options const& parse_opts,
     h_valid[i] = string_indices[i] ? nullptr : out_buffers[i].null_mask();
   }
 
-  // Allocate is_quoted_flags arrays for string columns to track which fields were quoted
+  // Quoted flags are only consumed by doublequote unescaping, so skip them otherwise.
   std::vector<rmm::device_uvector<bool>> is_quoted_flags_storage;
   auto h_is_quoted_flags = cudf::detail::make_host_vector<bool*>(num_active_columns, stream);
   for (int i = 0; i < num_active_columns; ++i) {
-    if (column_types[i].id() == type_id::STRING) {
+    if (track_quoted_fields && column_types[i].id() == type_id::STRING) {
       is_quoted_flags_storage.emplace_back(cudf::detail::make_zeroed_device_uvector_async<bool>(
         num_records, stream, cudf::get_current_device_resource_ref()));
       h_is_quoted_flags[i] = is_quoted_flags_storage.back().data();
@@ -720,7 +721,10 @@ decode_result decode_data(parse_options const& parse_opts,
     make_device_uvector_async(h_data, stream, cudf::get_current_device_resource_ref()),
     make_device_uvector_async(h_valid, stream, cudf::get_current_device_resource_ref()),
     d_valid_counts,
-    make_device_uvector_async(h_is_quoted_flags, stream, cudf::get_current_device_resource_ref()),
+    track_quoted_fields ? device_span<bool* const>{make_device_uvector_async(
+                            h_is_quoted_flags, stream, cudf::get_current_device_resource_ref())}
+                        : device_span<bool* const>{},
+    use_compact_strings,
     stream);
 
   auto const h_valid_counts = cudf::detail::make_host_vector(d_valid_counts, stream);
@@ -970,7 +974,8 @@ table_with_metadata read_csv(cudf::io::datasource* source,
   auto out_columns = std::vector<std::unique_ptr<cudf::column>>();
   out_columns.reserve(column_types.size());
   if (num_records != 0) {
-    auto decode_result = decode_data(  //
+    bool const doublequote_enabled = (parse_opts.quotechar != '\0' && parse_opts.doublequote);
+    auto decode_result             = decode_data(  //
       parse_opts,
       column_flags,
       column_names,
@@ -980,6 +985,7 @@ table_with_metadata read_csv(cudf::io::datasource* source,
       num_records,
       num_actual_columns,
       num_active_columns,
+      doublequote_enabled,
       stream,
       mr);
 
@@ -988,8 +994,6 @@ table_with_metadata read_csv(cudf::io::datasource* source,
     auto& out_buffers     = decode_result.buffers;
     auto& is_quoted_flags = decode_result.is_quoted_flags;
     auto& string_indices  = decode_result.string_indices;
-
-    bool const doublequote_enabled = (parse_opts.quotechar != '\0' && parse_opts.doublequote);
 
     std::vector<size_t> string_col_indices;
     for (size_t i = 0; i < column_types.size(); ++i) {
@@ -1015,7 +1019,6 @@ table_with_metadata read_csv(cudf::io::datasource* source,
 
       auto process_string_column = [&](size_t str_col_idx, cuda::stream_ref col_stream) {
         auto const col_idx    = string_col_indices[str_col_idx];
-        auto const is_quoted  = device_span<bool>(is_quoted_flags[str_col_idx]);
         auto& compact_indices = string_indices[col_idx];
         auto& wide_indices    = out_buffers[col_idx]._strings;
         auto const raw_csv    = data.data();
@@ -1024,7 +1027,7 @@ table_with_metadata read_csv(cudf::io::datasource* source,
         // Also bind exceptional cleanup to the stream consuming the staging buffers.
         if (compact_indices) { compact_indices->set_stream(col_stream); }
         if (wide_indices) { wide_indices->set_stream(col_stream); }
-        is_quoted_flags[str_col_idx].set_stream(col_stream);
+        if (doublequote_enabled) { is_quoted_flags[str_col_idx].set_stream(col_stream); }
         auto const original_pairs = cuda::transform_iterator(
           cuda::counting_iterator<size_type>{0},
           cuda::proclaim_return_type<cudf::strings::detail::string_index_pair>(
@@ -1043,7 +1046,7 @@ table_with_metadata read_csv(cudf::io::datasource* source,
         auto release_staging = [&]() {
           compact_indices.reset();
           wide_indices.reset();
-          is_quoted_flags[str_col_idx].release();
+          if (doublequote_enabled) { is_quoted_flags[str_col_idx].release(); }
         };
         if (!doublequote_enabled) {
           out_columns[col_idx] = make_original_column(mr);
@@ -1051,6 +1054,7 @@ table_with_metadata read_csv(cudf::io::datasource* source,
           return;
         }
 
+        auto const is_quoted = device_span<bool>(is_quoted_flags[str_col_idx]);
         // Count how many rows were quoted to determine the fast path
         auto const num_quoted = thrust::count(
           rmm::exec_policy_nosync(col_stream, cudf::get_current_device_resource_ref()),

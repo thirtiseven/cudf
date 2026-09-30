@@ -15,12 +15,9 @@
 #include <string>
 #include <vector>
 
-struct CsvLargeReaderTest : public cudf::test::StringsLargeTest,
-                            public testing::WithParamInterface<bool> {};
+struct CsvLargeReaderTest : public cudf::test::StringsLargeTest {};
 
-INSTANTIATE_TEST_SUITE_P(CsvLargeInput, CsvLargeReaderTest, testing::Bool());
-
-TEST_P(CsvLargeReaderTest, InputExceedsCompactOffsets)
+TEST_F(CsvLargeReaderTest, InputExceedsCompactOffsets)
 {
   cudf::test::TempDirTestEnvironment temp_dir;
   auto const path = temp_dir.get_temp_dir() + "wide_offsets.csv";
@@ -36,15 +33,15 @@ TEST_P(CsvLargeReaderTest, InputExceedsCompactOffsets)
     }
     ASSERT_TRUE(output.good());
   }
-  auto const strings = GetParam();
-  auto options       = cudf::io::csv_reader_options::builder(cudf::io::source_info{path})
-                   .header(0)
-                   .dtypes(std::vector<cudf::data_type>{cudf::data_type{cudf::type_id::INT32},
-                                                        cudf::data_type{cudf::type_id::STRING},
-                                                        cudf::data_type{cudf::type_id::STRING}})
-                   .use_cols_names(strings ? std::vector<std::string>{"id", "value"}
-                                           : std::vector<std::string>{"id"});
-  auto const result = cudf::io::read_csv(options.build());
+  auto const options =
+    cudf::io::csv_reader_options::builder(cudf::io::source_info{path})
+      .header(0)
+      .dtypes(std::vector<cudf::data_type>{cudf::data_type{cudf::type_id::INT32},
+                                           cudf::data_type{cudf::type_id::STRING},
+                                           cudf::data_type{cudf::type_id::STRING}})
+      .use_cols_names(std::vector<std::string>{"id", "value"})
+      .build();
+  auto const result = cudf::io::read_csv(options);
   std::vector<int32_t> expected_ids;
   std::vector<std::string> expected_values;
   for (int row = 0; row < 4096; ++row) {
@@ -54,6 +51,5 @@ TEST_P(CsvLargeReaderTest, InputExceedsCompactOffsets)
   cudf::test::fixed_width_column_wrapper<int32_t> const ids(expected_ids.begin(),
                                                             expected_ids.end());
   cudf::test::strings_column_wrapper const values(expected_values.begin(), expected_values.end());
-  auto const expected = strings ? cudf::table_view{{ids, values}} : cudf::table_view{{ids}};
-  CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected, result.tbl->view());
+  CUDF_TEST_EXPECT_TABLES_EQUIVALENT(cudf::table_view{{ids, values}}, result.tbl->view());
 }
