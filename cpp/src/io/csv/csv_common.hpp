@@ -8,24 +8,31 @@
 #include "io/utilities/column_type_histogram.hpp"
 
 #include <cstdint>
+#include <limits>
 
 namespace cudf {
 namespace io {
 namespace csv {
-// Relative offsets halve per-cell staging for inputs that fit below the null sentinel.
-struct compact_string_index_pair {
-  static constexpr uint32_t null_offset = UINT32_MAX;
+// Offsets relative to the input replace pointers so inputs below the compact null sentinel can
+// stage 8-byte entries; larger inputs use the same layout with 64-bit offsets.
+template <typename OffsetT>
+struct string_offset_pair {
+  using offset_type                        = OffsetT;
+  static constexpr offset_type null_offset = std::numeric_limits<offset_type>::max();
 
-  uint32_t offset{null_offset};
+  offset_type offset{null_offset};
   uint32_t length{0};
 };
 
-static_assert(sizeof(compact_string_index_pair) == 8);
+using compact_string_offset_pair = string_offset_pair<uint32_t>;
+using wide_string_offset_pair    = string_offset_pair<uint64_t>;
+
+static_assert(sizeof(compact_string_offset_pair) == 8);
 
 // Offsets are at most data_size (an empty trailing field), so the sentinel stays unreachable.
 [[nodiscard]] constexpr bool use_compact_string_index(size_t data_size)
 {
-  return data_size < compact_string_index_pair::null_offset;
+  return data_size < compact_string_offset_pair::null_offset;
 }
 
 namespace column_parse {

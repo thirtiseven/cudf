@@ -6,6 +6,7 @@
 #include <cudf_test/base_fixture.hpp>
 #include <cudf_test/column_utilities.hpp>
 #include <cudf_test/column_wrapper.hpp>
+#include <cudf_test/default_stream.hpp>
 #include <cudf_test/iterator_utilities.hpp>
 #include <cudf_test/memory_resource_utilities.hpp>
 #include <cudf_test/random.hpp>
@@ -43,6 +44,7 @@
 #include <string>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 using cudf::data_type;
@@ -958,9 +960,31 @@ TEST_F(CsvReaderTest, Strings)
 struct CsvStringStagingTest : public CsvReaderTest,
                               public testing::WithParamInterface<std::tuple<bool, bool>> {};
 
+// Keep top-level commas out of the lambda; they would split the macro arguments.
 INSTANTIATE_TEST_SUITE_P(CsvStringStaging,
                          CsvStringStagingTest,
-                         testing::Combine(testing::Bool(), testing::Bool()));
+                         testing::Combine(testing::Bool(), testing::Bool()),
+                         [](auto const& info) {
+                           return std::string{std::get<0>(info.param) ? "Doublequote"
+                                                                      : "NoDoublequote"} +
+                                  (std::get<1>(info.param) ? "Pruned" : "AllColumns");
+                         });
+
+namespace {
+
+cudf::io::csv_reader_options_builder string_staging_options(std::string const& buffer,
+                                                            std::vector<data_type> dtypes,
+                                                            bool doublequote)
+{
+  return cudf::io::csv_reader_options::builder(
+           cudf::io::source_info{cudf::host_span<std::byte const>{
+             reinterpret_cast<std::byte const*>(buffer.data()), buffer.size()}})
+    .header(0)
+    .dtypes(std::move(dtypes))
+    .doublequote(doublequote);
+}
+
+}  // namespace
 
 TEST_P(CsvStringStagingTest, MissingFields)
 {
@@ -970,17 +994,9 @@ TEST_P(CsvStringStagingTest, MissingFields)
     "1,skip,alpha,\"a\"\"b\",\"m\"\"n\",last\n"
     "2,skip,beta,\"c\"\"d\",plain,end\n"
     "3,skip\n";
-  auto builder = cudf::io::csv_reader_options::builder(
-                   cudf::io::source_info{cudf::host_span<std::byte const>{
-                     reinterpret_cast<std::byte const*>(buffer.data()), buffer.size()}})
-                   .header(0)
-                   .dtypes(std::vector<data_type>{dtype<int32_t>(),
-                                                  dtype<cudf::string_view>(),
-                                                  dtype<cudf::string_view>(),
-                                                  dtype<cudf::string_view>(),
-                                                  dtype<cudf::string_view>(),
-                                                  dtype<cudf::string_view>()})
-                   .doublequote(doublequote);
+  auto dtypes  = std::vector<data_type>(6, dtype<cudf::string_view>());
+  dtypes[0]    = dtype<int32_t>();
+  auto builder = string_staging_options(buffer, dtypes, doublequote);
   if (prune) { builder.use_cols_names({"id", "quoted", "tail"}); }
   auto const result = cudf::io::read_csv(builder.build());
 
@@ -1004,17 +1020,9 @@ TEST_P(CsvStringStagingTest, QuoteBranches)
     "id,ignored,plain,quoted,mixed,tail\n"
     "1,skip,alpha,\"a\"\"b\",\"m\"\"n\",last\n"
     "2,skip,beta,\"c\"\"d\",plain,end\n";
-  auto builder = cudf::io::csv_reader_options::builder(
-                   cudf::io::source_info{cudf::host_span<std::byte const>{
-                     reinterpret_cast<std::byte const*>(buffer.data()), buffer.size()}})
-                   .header(0)
-                   .dtypes(std::vector<data_type>{dtype<int32_t>(),
-                                                  dtype<cudf::string_view>(),
-                                                  dtype<cudf::string_view>(),
-                                                  dtype<cudf::string_view>(),
-                                                  dtype<cudf::string_view>(),
-                                                  dtype<cudf::string_view>()})
-                   .doublequote(doublequote);
+  auto dtypes  = std::vector<data_type>(6, dtype<cudf::string_view>());
+  dtypes[0]    = dtype<int32_t>();
+  auto builder = string_staging_options(buffer, dtypes, doublequote);
   if (prune) { builder.use_cols_names({"plain", "quoted", "mixed"}); }
   auto const result = cudf::io::read_csv(builder.build());
 
@@ -1039,17 +1047,10 @@ TEST_P(CsvStringStagingTest, EmptyAndNullFields)
     "2,skip,,x\n"
     "3,skip,NULL,x\n"
     "4,skip\n";
-  auto builder = cudf::io::csv_reader_options::builder(
-                   cudf::io::source_info{cudf::host_span<std::byte const>{
-                     reinterpret_cast<std::byte const*>(buffer.data()), buffer.size()}})
-                   .header(0)
-                   .dtypes(std::vector<data_type>{dtype<int32_t>(),
-                                                  dtype<cudf::string_view>(),
-                                                  dtype<cudf::string_view>(),
-                                                  dtype<cudf::string_view>()})
-                   .keep_default_na(false)
-                   .na_values({"NULL"})
-                   .doublequote(doublequote);
+  auto dtypes = std::vector<data_type>(4, dtype<cudf::string_view>());
+  dtypes[0]   = dtype<int32_t>();
+  auto builder =
+    string_staging_options(buffer, dtypes, doublequote).keep_default_na(false).na_values({"NULL"});
   if (prune) { builder.use_cols_names({"value"}); }
   auto const result = cudf::io::read_csv(builder.build());
 
@@ -1065,19 +1066,15 @@ TEST_F(CsvReaderTest, StringMaterializationResources)
 {
   constexpr std::size_t payload_size = 1 << 20;
   std::string const payload(payload_size, 'a');
-  auto const stream = cudf::get_default_stream();
+  auto const stream = cudf::test::get_default_stream();
 
   for (bool doublequote : {false, true}) {
     SCOPED_TRACE(doublequote);
     for (bool quoted : {false, true}) {
       SCOPED_TRACE(quoted);
       std::string const buffer = quoted ? "\"" + payload + "\"\"z\"\n" : payload + "z\n";
-      auto const options       = cudf::io::csv_reader_options::builder(
-                             cudf::io::source_info{cudf::host_span<std::byte const>{
-                               reinterpret_cast<std::byte const*>(buffer.data()), buffer.size()}})
+      auto const options = string_staging_options(buffer, {dtype<cudf::string_view>()}, doublequote)
                              .header(-1)
-                             .dtypes(std::vector<data_type>{dtype<cudf::string_view>()})
-                             .doublequote(doublequote)
                              .build();
       cudf::test::strings_column_wrapper const expected{
         payload + (quoted ? (doublequote ? "\"z" : "\"\"z") : "z")};
@@ -1108,13 +1105,9 @@ TEST_F(CsvReaderTest, StringStagingUsesTemporaryResource)
   for (int row = 0; row < num_rows; ++row) {
     buffer += "abcde\n";
   }
-  auto const stream  = cudf::get_default_stream();
-  auto const options = cudf::io::csv_reader_options::builder(
-                         cudf::io::source_info{cudf::host_span<std::byte const>{
-                           reinterpret_cast<std::byte const*>(buffer.data()), buffer.size()}})
-                         .header(-1)
-                         .dtypes(std::vector<data_type>{dtype<cudf::string_view>()})
-                         .build();
+  auto const stream = cudf::test::get_default_stream();
+  auto const options =
+    string_staging_options(buffer, {dtype<cudf::string_view>()}, true).header(-1).build();
   std::vector<std::string> const values(num_rows, "abcde");
   cudf::test::strings_column_wrapper const expected(values.begin(), values.end());
   cudf::test::memory_resource_test_harness resources;
@@ -1139,19 +1132,15 @@ TEST_P(CsvStringStagingTest, WorkerAllocationFailureAndRecovery)
     "ignored,plain,quoted,mixed,tail\n"
     "skip,alpha,\"a\"\"b\",\"m\"\"n\",last\n"
     "skip,beta,\"c\"\"d\",plain,end\n";
-  auto builder = cudf::io::csv_reader_options::builder(
-                   cudf::io::source_info{cudf::host_span<std::byte const>{
-                     reinterpret_cast<std::byte const*>(buffer.data()), buffer.size()}})
-                   .header(0)
-                   .dtypes(std::vector<data_type>(5, dtype<cudf::string_view>()))
-                   .doublequote(doublequote);
+  auto builder = string_staging_options(
+    buffer, std::vector<data_type>(5, dtype<cudf::string_view>()), doublequote);
   if (prune) { builder.use_cols_names({"plain", "quoted", "mixed"}); }
   auto const options = builder.build();
   auto const caller  = std::this_thread::get_id();
   // Keep the upstream resource alive while replacing the device-global resource.
   cuda::mr::any_resource<cuda::mr::device_accessible> upstream{
     cudf::get_current_device_resource_ref()};
-  auto const stream = cudf::get_default_stream();
+  auto const stream = cudf::test::get_default_stream();
   cudf::test::strings_column_wrapper const ignored{"skip", "skip"};
   cudf::test::strings_column_wrapper const plain{"alpha", "beta"};
   cudf::test::strings_column_wrapper const quoted{doublequote ? "a\"b" : "a\"\"b",
@@ -1161,40 +1150,53 @@ TEST_P(CsvStringStagingTest, WorkerAllocationFailureAndRecovery)
   auto const expected =
     prune ? table_view{{plain, quoted, mixed}} : table_view{{ignored, plain, quoted, mixed, tail}};
 
-  for (int fail_at : {1, 3, 8}) {
-    SCOPED_TRACE(fail_at);
-    std::atomic<int> worker_allocations{0};
-    std::atomic<std::size_t> live_bytes{0};
-    std::atomic<bool> inject{true};
-    std::atomic<bool> injected{false};
-    rmm::mr::callback_memory_resource failing_mr{
-      [&](std::size_t bytes, auto allocation_stream, void*) -> void* {
-        if (std::this_thread::get_id() != caller && inject && ++worker_allocations == fail_at) {
-          injected = true;
-          throw rmm::out_of_memory{"Injected CSV materialization allocation failure"};
-        }
-        auto* ptr =
-          upstream.allocate(allocation_stream, bytes, cuda::mr::default_cuda_malloc_alignment);
-        live_bytes += bytes;
-        return ptr;
-      },
-      [&](void* ptr, std::size_t bytes, auto allocation_stream, void*) {
-        upstream.deallocate(allocation_stream, ptr, bytes, cuda::mr::default_cuda_malloc_alignment);
-        live_bytes -= bytes;
-      }};
-    cudf::test::scoped_current_device_resource current_mr{failing_mr};
-    EXPECT_THROW(cudf::io::read_csv(options, stream, failing_mr), rmm::out_of_memory);
-    EXPECT_TRUE(injected);
-    stream.sync();
-    EXPECT_EQ(live_bytes.load(), 0);
-
-    inject = false;
+  // Zero disables injection; otherwise the n-th allocation made by a worker thread fails.
+  std::atomic<int> fail_at{0};
+  std::atomic<int> worker_allocations{0};
+  std::atomic<std::size_t> live_bytes{0};
+  std::atomic<bool> injected{false};
+  rmm::mr::callback_memory_resource failing_mr{
+    [&](std::size_t bytes, auto allocation_stream, void*) -> void* {
+      if (std::this_thread::get_id() != caller && ++worker_allocations == fail_at) {
+        injected = true;
+        throw rmm::out_of_memory{"Injected CSV materialization allocation failure"};
+      }
+      auto* ptr =
+        upstream.allocate(allocation_stream, bytes, cuda::mr::default_cuda_malloc_alignment);
+      live_bytes += bytes;
+      return ptr;
+    },
+    [&](void* ptr, std::size_t bytes, auto allocation_stream, void*) {
+      upstream.deallocate(allocation_stream, ptr, bytes, cuda::mr::default_cuda_malloc_alignment);
+      live_bytes -= bytes;
+    }};
+  cudf::test::scoped_current_device_resource current_mr{failing_mr};
+  auto const read_and_verify = [&] {
     {
       auto const result = cudf::io::read_csv(options, stream, failing_mr);
       CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected, result.tbl->view());
     }
     stream.sync();
     EXPECT_EQ(live_bytes.load(), 0);
+  };
+
+  // Derive injection points from the observed count so they stay reachable as internals change.
+  read_and_verify();
+  auto const total_worker_allocations = worker_allocations.load();
+  ASSERT_GT(total_worker_allocations, 0);
+
+  for (int point : {1, (total_worker_allocations + 1) / 2, total_worker_allocations}) {
+    SCOPED_TRACE(point);
+    worker_allocations = 0;
+    injected           = false;
+    fail_at            = point;
+    EXPECT_THROW(cudf::io::read_csv(options, stream, failing_mr), rmm::out_of_memory);
+    EXPECT_TRUE(injected);
+    stream.sync();
+    EXPECT_EQ(live_bytes.load(), 0);
+
+    fail_at = 0;
+    read_and_verify();
   }
 }
 

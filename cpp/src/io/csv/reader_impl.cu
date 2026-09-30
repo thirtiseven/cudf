@@ -40,6 +40,8 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <rmm/device_buffer.hpp>
+#include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
@@ -638,13 +640,116 @@ void infer_column_types(parse_options const& parse_opts,
   }
 }
 
+template <typename StringOffsetPair>
+std::unique_ptr<rmm::device_buffer> make_null_string_indices(size_type size,
+                                                             cuda::stream_ref stream)
+{
+  rmm::device_uvector<StringOffsetPair> indices(
+    size, stream, cudf::get_current_device_resource_ref());
+  // Short rows leave missing fields untouched; zero is a valid offset, not a null.
+  thrust::fill(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+               indices.begin(),
+               indices.end(),
+               StringOffsetPair{});
+  return std::make_unique<rmm::device_buffer>(indices.release());
+}
+
 /**
- * @brief Result of decode_data containing column buffers and quoted field tracking
+ * @brief Builds a strings column from staged offset/length pairs into the CSV data
+ *
+ * @param data The CSV data the staged offsets refer to
+ * @param indices Per-row staged string entries
+ * @param is_quoted Per-row quoted field flags; empty when doublequote unescaping is disabled
+ * @param quotechar Quote character scalar; used only when `is_quoted` is not empty
+ * @param dblquotechar Escaped quote scalar; used only when `is_quoted` is not empty
+ * @param stream CUDA stream used for device memory operations and kernel launches
+ * @param mr Device memory resource used to allocate the returned column's device memory
+ * @return The strings column
+ */
+template <typename StringOffsetPair>
+std::unique_ptr<column> materialize_string_column(device_span<char const> data,
+                                                  device_span<StringOffsetPair const> indices,
+                                                  device_span<bool const> is_quoted,
+                                                  cudf::string_scalar const* quotechar,
+                                                  cudf::string_scalar const* dblquotechar,
+                                                  cuda::stream_ref stream,
+                                                  rmm::device_async_resource_ref mr)
+{
+  auto const num_rows       = static_cast<size_type>(indices.size());
+  auto const original_pairs = cuda::transform_iterator(
+    indices.begin(),
+    cuda::proclaim_return_type<cudf::strings::detail::string_index_pair>(
+      [raw_csv = data.data()] __device__(StringOffsetPair const& pair) {
+        return pair.offset == StringOffsetPair::null_offset
+                 ? cudf::strings::detail::string_index_pair{nullptr, 0}
+                 : cudf::strings::detail::string_index_pair{raw_csv + pair.offset,
+                                                            static_cast<size_type>(pair.length)};
+      }));
+  auto make_original_column = [&](rmm::device_async_resource_ref column_mr) {
+    return cudf::strings::detail::make_strings_column(
+      original_pairs, original_pairs + num_rows, stream, column_mr);
+  };
+  if (is_quoted.empty()) { return make_original_column(mr); }
+
+  // Count how many rows were quoted to determine the fast path
+  auto const num_quoted =
+    thrust::count(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                  is_quoted.begin(),
+                  is_quoted.end(),
+                  true);
+  // Fast path: no rows were quoted, skip replacement entirely
+  if (num_quoted == 0) { return make_original_column(mr); }
+
+  auto replaced_all_col = cudf::strings::detail::replace(
+    make_original_column(cudf::get_current_device_resource_ref())->view(),
+    *dblquotechar,
+    *quotechar,
+    -1,
+    stream,
+    mr);
+  // Fast path: all rows were quoted, apply replacement to all
+  if (std::cmp_equal(num_quoted, num_rows)) { return replaced_all_col; }
+
+  // Need to replace only the quoted rows
+  auto const replaced_all_view = cudf::column_device_view::create(replaced_all_col->view(), stream);
+  auto const replaced_all_iter = cudf::detail::make_optional_iterator<cudf::string_view>(
+    *replaced_all_view, cudf::nullate::DYNAMIC{replaced_all_col->nullable()});
+
+  auto const original_iter = cuda::transform_iterator(
+    original_pairs,
+    cuda::proclaim_return_type<cuda::std::optional<cudf::string_view>>(
+      [] __device__(auto const& pair) -> cuda::std::optional<cudf::string_view> {
+        return pair.first != nullptr ? cuda::std::optional<cudf::string_view>{cudf::string_view{
+                                         pair.first, pair.second}}
+                                     : cuda::std::nullopt;
+      }));
+
+  return cudf::strings::detail::copy_if_else(
+    replaced_all_iter,
+    replaced_all_iter + num_rows,
+    original_iter,
+    [is_quoted] __device__(size_type idx) { return is_quoted[idx]; },
+    stream,
+    mr);
+}
+
+template <typename T>
+device_span<T const> typed_span(rmm::device_buffer const& buffer)
+{
+  return {static_cast<T const*>(buffer.data()), buffer.size() / sizeof(T)};
+}
+
+/**
+ * @brief Result of decode_data containing column buffers and string staging
+ *
+ * String columns are staged outside `buffers`, which only carry their names. Staging vectors are
+ * indexed by active column and hold null entries for non-string columns.
  */
 struct decode_result {
   std::vector<column_buffer> buffers;
-  std::vector<rmm::device_uvector<bool>> is_quoted_flags;
-  std::vector<std::unique_ptr<rmm::device_uvector<compact_string_index_pair>>> string_indices;
+  std::vector<std::unique_ptr<rmm::device_uvector<bool>>> is_quoted_flags;
+  std::vector<std::unique_ptr<rmm::device_buffer>> string_indices;
+  bool compact_strings;
 };
 
 decode_result decode_data(parse_options const& parse_opts,
@@ -663,25 +768,20 @@ decode_result decode_data(parse_options const& parse_opts,
   // Alloc output; columns' data memory is still expected for empty dataframe
   std::vector<column_buffer> out_buffers;
   out_buffers.reserve(column_types.size());
-  std::vector<std::unique_ptr<rmm::device_uvector<compact_string_index_pair>>> string_indices(
-    num_active_columns);
+  std::vector<std::unique_ptr<rmm::device_buffer>> string_indices(num_active_columns);
   auto const use_compact_strings = use_compact_string_index(data.size());
 
   for (int col = 0, active_col = 0; col < num_actual_columns; ++col) {
     if (column_flags[col] & column_parse::enabled) {
-      auto const compact = use_compact_strings && column_types[active_col].id() == type_id::STRING;
-      auto out_buffer    = compact
-                             ? column_buffer(column_types[active_col], true)
-                             : column_buffer(column_types[active_col], num_records, true, stream, mr);
-      if (compact) {
-        auto& indices = string_indices[active_col];
-        indices =
-          std::make_unique<rmm::device_uvector<compact_string_index_pair>>(num_records, stream);
-        // Short rows leave missing fields untouched; zero is a valid offset, not a null.
-        thrust::fill(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-                     indices->begin(),
-                     indices->end(),
-                     compact_string_index_pair{});
+      auto const is_string = column_types[active_col].id() == type_id::STRING;
+      auto out_buffer      = is_string
+                               ? column_buffer(column_types[active_col], true)
+                               : column_buffer(column_types[active_col], num_records, true, stream, mr);
+      if (is_string) {
+        string_indices[active_col] =
+          use_compact_strings
+            ? make_null_string_indices<compact_string_offset_pair>(num_records, stream)
+            : make_null_string_indices<wide_string_offset_pair>(num_records, stream);
       }
 
       out_buffer.name = column_names[col];
@@ -699,13 +799,14 @@ decode_result decode_data(parse_options const& parse_opts,
   }
 
   // Quoted flags are only consumed by doublequote unescaping, so skip them otherwise.
-  std::vector<rmm::device_uvector<bool>> is_quoted_flags_storage;
+  std::vector<std::unique_ptr<rmm::device_uvector<bool>>> is_quoted_flags(num_active_columns);
   auto h_is_quoted_flags = cudf::detail::make_host_vector<bool*>(num_active_columns, stream);
   for (int i = 0; i < num_active_columns; ++i) {
     if (track_quoted_fields && column_types[i].id() == type_id::STRING) {
-      is_quoted_flags_storage.emplace_back(cudf::detail::make_zeroed_device_uvector_async<bool>(
-        num_records, stream, cudf::get_current_device_resource_ref()));
-      h_is_quoted_flags[i] = is_quoted_flags_storage.back().data();
+      is_quoted_flags[i] = std::make_unique<rmm::device_uvector<bool>>(
+        cudf::detail::make_zeroed_device_uvector_async<bool>(
+          num_records, stream, cudf::get_current_device_resource_ref()));
+      h_is_quoted_flags[i] = is_quoted_flags[i]->data();
     }
   }
 
@@ -732,7 +833,10 @@ decode_result decode_data(parse_options const& parse_opts,
     out_buffers[i].null_count() = num_records - h_valid_counts[i];
   }
 
-  return {std::move(out_buffers), std::move(is_quoted_flags_storage), std::move(string_indices)};
+  return {std::move(out_buffers),
+          std::move(is_quoted_flags),
+          std::move(string_indices),
+          use_compact_strings};
 }
 
 cudf::detail::host_vector<data_type> determine_column_types(
@@ -1000,7 +1104,7 @@ table_with_metadata read_csv(cudf::io::datasource* source,
       if (column_types[i].id() == type_id::STRING) { string_col_indices.push_back(i); }
     }
 
-    // Process string columns with doublequote handling in parallel using thread pool
+    // Materialize string columns from their staged indices in parallel using the thread pool
     auto const num_string_cols = string_col_indices.size();
     if (num_string_cols > 0) {
       auto const quotechar = parse_opts.quotechar;
@@ -1018,90 +1122,28 @@ table_with_metadata read_csv(cudf::io::datasource* source,
       auto streams               = cudf::detail::fork_streams(stream, num_tasks);
 
       auto process_string_column = [&](size_t str_col_idx, cuda::stream_ref col_stream) {
-        auto const col_idx    = string_col_indices[str_col_idx];
-        auto& compact_indices = string_indices[col_idx];
-        auto& wide_indices    = out_buffers[col_idx]._strings;
-        auto const raw_csv    = data.data();
-        auto const compact    = compact_indices ? compact_indices->data() : nullptr;
-        auto const wide       = wide_indices ? wide_indices->data() : nullptr;
+        auto const col_idx = string_col_indices[str_col_idx];
+        auto& indices      = string_indices[col_idx];
+        auto& is_quoted    = is_quoted_flags[col_idx];
         // Also bind exceptional cleanup to the stream consuming the staging buffers.
-        if (compact_indices) { compact_indices->set_stream(col_stream); }
-        if (wide_indices) { wide_indices->set_stream(col_stream); }
-        if (doublequote_enabled) { is_quoted_flags[str_col_idx].set_stream(col_stream); }
-        auto const original_pairs = cuda::transform_iterator(
-          cuda::counting_iterator<size_type>{0},
-          cuda::proclaim_return_type<cudf::strings::detail::string_index_pair>(
-            [raw_csv, compact, wide] __device__(size_type idx) {
-              if (compact == nullptr) { return wide[idx]; }
-              auto const pair = compact[idx];
-              return pair.offset == compact_string_index_pair::null_offset
-                       ? cudf::strings::detail::string_index_pair{nullptr, 0}
-                       : cudf::strings::detail::string_index_pair{
-                           raw_csv + pair.offset, static_cast<size_type>(pair.length)};
-            }));
-        auto make_original_column = [&](rmm::device_async_resource_ref column_mr) {
-          return cudf::strings::detail::make_strings_column(
-            original_pairs, original_pairs + num_records, col_stream, column_mr);
+        indices->set_stream(col_stream);
+        if (is_quoted) { is_quoted->set_stream(col_stream); }
+        auto const quoted_span =
+          is_quoted ? device_span<bool const>{*is_quoted} : device_span<bool const>{};
+        auto const materialize = [&](auto typed_indices) {
+          return materialize_string_column(data,
+                                           typed_indices,
+                                           quoted_span,
+                                           quotechar_scalar.get(),
+                                           dblquotechar_scalar.get(),
+                                           col_stream,
+                                           mr);
         };
-        auto release_staging = [&]() {
-          compact_indices.reset();
-          wide_indices.reset();
-          if (doublequote_enabled) { is_quoted_flags[str_col_idx].release(); }
-        };
-        if (!doublequote_enabled) {
-          out_columns[col_idx] = make_original_column(mr);
-          release_staging();
-          return;
-        }
-
-        auto const is_quoted = device_span<bool>(is_quoted_flags[str_col_idx]);
-        // Count how many rows were quoted to determine the fast path
-        auto const num_quoted = thrust::count(
-          rmm::exec_policy_nosync(col_stream, cudf::get_current_device_resource_ref()),
-          is_quoted.begin(),
-          is_quoted.end(),
-          true);
-        if (num_quoted == 0) {
-          // Fast path: no rows were quoted, skip replacement entirely
-          out_columns[col_idx] = make_original_column(mr);
-        } else {
-          auto replaced_all_col = cudf::strings::detail::replace(
-            make_original_column(cudf::get_current_device_resource_ref())->view(),
-            *dblquotechar_scalar,
-            *quotechar_scalar,
-            -1,
-            col_stream,
-            mr);
-          if (std::cmp_equal(num_quoted, num_records)) {
-            // Fast path: all rows were quoted, apply replacement to all
-            out_columns[col_idx] = std::move(replaced_all_col);
-          } else {
-            // Need to replace only the quoted rows
-            auto const replaced_all_view =
-              cudf::column_device_view::create(replaced_all_col->view(), col_stream);
-            auto const replaced_all_iter = cudf::detail::make_optional_iterator<cudf::string_view>(
-              *replaced_all_view, cudf::nullate::DYNAMIC{replaced_all_col->nullable()});
-
-            auto const original_iter = cuda::transform_iterator(
-              original_pairs,
-              cuda::proclaim_return_type<cuda::std::optional<cudf::string_view>>(
-                [] __device__(auto const& pair) -> cuda::std::optional<cudf::string_view> {
-                  return pair.first != nullptr
-                           ? cuda::std::optional<cudf::string_view>{cudf::string_view{pair.first,
-                                                                                      pair.second}}
-                           : cuda::std::nullopt;
-                }));
-
-            out_columns[col_idx] = cudf::strings::detail::copy_if_else(
-              replaced_all_iter,
-              replaced_all_iter + num_records,
-              original_iter,
-              [is_quoted] __device__(size_type idx) { return is_quoted[idx]; },
-              col_stream,
-              mr);
-          }
-        }
-        release_staging();
+        out_columns[col_idx] = decode_result.compact_strings
+                                 ? materialize(typed_span<compact_string_offset_pair>(*indices))
+                                 : materialize(typed_span<wide_string_offset_pair>(*indices));
+        indices.reset();
+        is_quoted.reset();
       };
 
       std::vector<std::future<void>> tasks;
@@ -1145,6 +1187,10 @@ table_with_metadata read_csv(cudf::io::datasource* source,
     // Create output columns for the columns that were not processed in the parallel loop
     for (size_t i = 0; i < column_types.size(); ++i) {
       if (!out_columns[i]) {
+        // String buffers only carry names; their data lives in the staged indices.
+        CUDF_EXPECTS(column_types[i].id() != type_id::STRING,
+                     "String columns must be materialized from staged indices",
+                     std::logic_error);
         out_columns[i] = make_column(out_buffers[i], nullptr, std::nullopt, stream);
       }
     }
